@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 import os
+import random
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from playwright.sync_api import sync_playwright
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from tracker_core import Product, df_to_csv_bytes, load_seed_csv, scrape_products  # noqa: E402
+from tracker_core import (  # noqa: E402
+    Product,
+    ScrapeResult,
+    df_to_csv_bytes,
+    load_seed_csv,
+    scrape_playwright_generic,
+)
 
 
 TEST_PATH = APP_DIR / "data" / "cloud_playwright_smoke_test.csv"
@@ -25,6 +34,73 @@ def running_on_streamlit_cloud() -> bool:
         or os.getenv("STREAMLIT_SHARING_MODE") == "streamlit-cloud"
         or os.getenv("HOME") == "/home/adminuser"
     )
+
+
+def smoke_chromium_executable() -> str | None:
+    candidates = [
+        os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE"),
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    return None
+
+
+def launch_smoke_browser(playwright, headless: bool):
+    args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-extensions",
+    ]
+    kwargs = {
+        "headless": headless,
+        "args": args,
+    }
+    executable = smoke_chromium_executable()
+    if executable:
+        kwargs["executable_path"] = executable
+    return playwright.chromium.launch(**kwargs)
+
+
+def run_cloud_smoke(
+    products: list[Product],
+    headless: bool,
+    delay_min_sec: float,
+    delay_max_sec: float,
+    progress_callback=None,
+) -> list[ScrapeResult]:
+    results: list[ScrapeResult] = []
+    with sync_playwright() as playwright:
+        browser = launch_smoke_browser(playwright, headless=headless)
+        page = browser.new_page(viewport={"width": 1366, "height": 900})
+        try:
+            for idx, product in enumerate(products, start=1):
+                if progress_callback:
+                    progress_callback(idx, len(products), product, None)
+                time.sleep(random.uniform(delay_min_sec, delay_max_sec))
+                try:
+                    result = scrape_playwright_generic(page, product, navigation_timeout_ms=90_000)
+                except Exception as exc:
+                    result = ScrapeResult(
+                        product=product,
+                        status="error",
+                        error=f"{type(exc).__name__}: {exc}",
+                        source="cloud_smoke_exception",
+                    )
+                results.append(result)
+                if progress_callback:
+                    progress_callback(idx, len(products), product, result)
+        finally:
+            browser.close()
+    return results
 
 
 def result_rows(results) -> pd.DataFrame:
@@ -98,6 +174,7 @@ if is_cloud:
     st.checkbox("Headless browser", value=True, disabled=True)
 else:
     headless = st.checkbox("Headless browser", value=True)
+st.caption(f"Browser executable: `{smoke_chromium_executable() or 'Playwright default'}`")
 delay_min = st.number_input("Delay min seconds", min_value=0.0, value=3.0, step=0.5)
 delay_max = st.number_input("Delay max seconds", min_value=0.0, value=6.0, step=0.5)
 
@@ -124,9 +201,8 @@ if run_clicked:
 
     try:
         with st.spinner("Running Playwright smoke test"):
-            results = scrape_products(
+            results = run_cloud_smoke(
                 products,
-                scrapingdog_api_key="",
                 headless=headless,
                 delay_min_sec=float(delay_min),
                 delay_max_sec=float(delay_max),
