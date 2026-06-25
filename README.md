@@ -91,11 +91,19 @@ The GitHub token needs permission to read and write repository contents. For a f
 
 1. Open the Streamlit app.
 2. Edit rows directly in the table, or reupload the latest CSV/XLSX.
-3. Run the price scrape.
+3. Leave `Only rows missing this price column` checked for normal daily runs.
 4. Leave `Auto-save GitHub master after scrape` checked.
-5. The app commits the updated CSV back to `data/retail_wip_links_import.csv`.
-6. Download CSV or Excel whenever someone wants a local copy.
+5. Keep `Checkpoint save every rows` at `75` unless there is a reason to change it.
+6. Use `Max rows this run` for test runs; set it to `0` only when intentionally running all matched rows.
+7. Check `Confirm paid ScrapingDog run` before running Walmart or Amazon rows.
+8. Run the price scrape.
+9. The app checkpoint-saves the updated CSV back to `data/retail_wip_links_import.csv` every 75 rows.
+10. Download CSV or Excel whenever someone wants a local copy.
 
 The `Save to GitHub` button also saves the current edited table without running a scrape, which is useful after manually adding links.
 
 Column filters above the table narrow the visible rows by retailer, brand, color, size, title, link, and price-column blank/filled status. Use `Export Filtered CSV/Excel` for the visible filtered rows, or `Export Full CSV/Excel` for the complete master table.
+
+If a run is interrupted, use the same price column date and leave `Only rows missing this price column` checked. The next run will skip rows already saved in that date column and continue from the blanks.
+
+Scrape results are attached back to the exact table row they came from, so editing `size`, `color`, `title`, or other descriptive cells does not move price history to a different row.

@@ -8,7 +8,9 @@ import pandas as pd
 import streamlit as st
 
 from tracker_core import (
+    ROW_ID_COLUMN,
     SCRAPINGDOG_RETAILERS,
+    canonical_retailer,
     df_to_csv_bytes,
     df_to_xlsx_bytes,
     filter_products,
@@ -28,7 +30,6 @@ DEMO_PATH = APP_DIR / "data" / "demo_price_master.csv"
 DEFAULT_GITHUB_REPO = "huntbrian1/pricetrackstreamlitdemo"
 DEFAULT_GITHUB_BRANCH = "main"
 DEFAULT_GITHUB_DATA_PATH = "data/retail_wip_links_import.csv"
-ROW_ID_COLUMN = "_row_id"
 
 
 def get_secret(name: str) -> str:
@@ -114,6 +115,7 @@ def result_rows(results) -> pd.DataFrame:
     for result in results:
         rows.append(
             {
+                "row": result.product.row_id,
                 "retailer": result.product.retailer,
                 "brand": result.product.brand,
                 "color": result.product.color,
@@ -127,6 +129,22 @@ def result_rows(results) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def batched(items: list, batch_size: int) -> list[list]:
+    size = max(int(batch_size or 1), 1)
+    return [items[start : start + size] for start in range(0, len(items), size)]
+
+
+def estimate_scrapingdog_credits(products) -> int:
+    credits = 0
+    for product in products:
+        retailer = canonical_retailer(product.retailer)
+        if "walmart" in retailer:
+            credits += 5
+        elif "amazon" in retailer:
+            credits += 10
+    return credits
 
 
 def filter_options(df: pd.DataFrame, column: str) -> list[str]:
@@ -320,7 +338,23 @@ with st.sidebar:
         retailer_options,
         default=retailer_options,
     )
-    only_missing = st.checkbox("Only rows missing this price column", value=False)
+    run_visible_only = st.checkbox("Run visible filtered rows only", value=True)
+    only_missing = st.checkbox("Only rows missing this price column", value=True)
+    checkpoint_rows = st.number_input(
+        "Checkpoint save every rows",
+        min_value=1,
+        max_value=500,
+        value=75,
+        step=5,
+    )
+    max_rows_this_run = st.number_input(
+        "Max rows this run (0 = all)",
+        min_value=0,
+        max_value=5000,
+        value=75,
+        step=25,
+    )
+    confirm_paid_run = st.checkbox("Confirm paid ScrapingDog run")
 
     st.divider()
 
@@ -455,6 +489,26 @@ e5.caption(
     f"Filtered export: {len(current_filtered_export):,} rows. Full export: {len(current_table):,} rows."
 )
 
+run_source_table = apply_column_filters(current_table) if run_visible_only else add_row_ids(current_table)
+candidate_products = filter_products(
+    run_source_table,
+    retailers=selected_retailers,
+    only_missing_price_col=price_col if only_missing else None,
+)
+total_candidate_rows = len(candidate_products)
+if max_rows_this_run:
+    products_for_run = candidate_products[: int(max_rows_this_run)]
+else:
+    products_for_run = candidate_products
+estimated_credits = estimate_scrapingdog_credits(products_for_run)
+limit_note = ""
+if max_rows_this_run and total_candidate_rows > len(products_for_run):
+    limit_note = f" Limited to first {len(products_for_run):,} by Max rows."
+st.caption(
+    f"Ready to run {len(products_for_run):,} of {total_candidate_rows:,} matched rows. "
+    f"Estimated ScrapingDog credits: {estimated_credits:,}.{limit_note}"
+)
+
 save_col, run_col, result_col = st.columns([0.18, 0.22, 0.60], vertical_alignment="center")
 save_clicked = save_col.button(
     "Save to GitHub",
@@ -463,6 +517,7 @@ save_clicked = save_col.button(
 )
 run_clicked = run_col.button("Run price scrape", type="primary", use_container_width=True)
 result_slot = result_col.empty()
+checkpoint_slot = st.empty()
 
 if save_clicked:
     try:
@@ -474,13 +529,9 @@ if save_clicked:
         result_slot.error(f"GitHub save failed: {exc}")
 
 if run_clicked:
-    products = filter_products(
-        st.session_state.price_table,
-        retailers=selected_retailers,
-        only_missing_price_col=price_col if only_missing else None,
-    )
+    products = products_for_run
     needs_scrapingdog = any(
-        str(product.retailer).strip().lower() in SCRAPINGDOG_RETAILERS for product in products
+        canonical_retailer(product.retailer) in SCRAPINGDOG_RETAILERS for product in products
     )
 
     if delay_max < delay_min:
@@ -489,49 +540,87 @@ if run_clicked:
         result_slot.warning("No rows matched the selected filters.")
     elif needs_scrapingdog and not scrapingdog_key:
         result_slot.error("ScrapingDog key is required for Walmart and Amazon rows.")
+    elif needs_scrapingdog and not confirm_paid_run:
+        result_slot.error("Check Confirm paid ScrapingDog run before running Walmart or Amazon rows.")
+    elif needs_scrapingdog and (not auto_save_github or not can_sync_github):
+        result_slot.error("Paid ScrapingDog runs require GitHub auto-save so checkpoint results persist.")
     else:
         progress = st.progress(0)
         status = st.empty()
+        all_results = []
+        completed_rows = 0
+        save_message = ""
+        save_failed = ""
 
-        def on_progress(current, total, product, result):
-            progress.progress(min(current / max(total, 1), 1.0))
-            if result is None:
-                status.write(f"{current}/{total} {product.retailer}")
-            else:
-                status.write(f"{current}/{total} {product.retailer}: {result.status}")
+        batches = batched(products, int(checkpoint_rows))
 
         with st.spinner("Running scrape"):
-            results = scrape_products(
-                products,
-                scrapingdog_api_key=scrapingdog_key,
-                headless=headless,
-                delay_min_sec=float(delay_min),
-                delay_max_sec=float(delay_max),
-                progress_callback=on_progress,
-            )
+            for batch_number, batch in enumerate(batches, start=1):
+                batch_start = completed_rows + 1
+                batch_end = completed_rows + len(batch)
 
-        st.session_state.price_table = merge_results_into_master(
-            st.session_state.price_table,
-            results,
-            price_col=price_col,
-            now=datetime.now().astimezone(),
-        )
-        st.session_state.last_results = result_rows(results)
+                def on_progress(current, total, product, result):
+                    absolute_current = completed_rows + current
+                    progress.progress(min(absolute_current / max(len(products), 1), 1.0))
+                    if result is None:
+                        status.write(
+                            f"{absolute_current}/{len(products)} {product.retailer} "
+                            f"(batch {batch_number}/{len(batches)})"
+                        )
+                    else:
+                        status.write(
+                            f"{absolute_current}/{len(products)} {product.retailer}: {result.status} "
+                            f"(batch {batch_number}/{len(batches)})"
+                        )
 
-        save_message = ""
-        if auto_save_github and can_sync_github:
-            try:
-                st.session_state.last_save_url = save_current_table_to_github(
-                    f"Update price master for {price_col}"
+                batch_results = scrape_products(
+                    batch,
+                    scrapingdog_api_key=scrapingdog_key,
+                    headless=headless,
+                    delay_min_sec=float(delay_min),
+                    delay_max_sec=float(delay_max),
+                    progress_callback=on_progress,
                 )
-                save_message = " Saved to GitHub."
-            except Exception as exc:
-                save_message = f" GitHub save failed: {exc}"
+
+                all_results.extend(batch_results)
+                st.session_state.price_table = merge_results_into_master(
+                    st.session_state.price_table,
+                    batch_results,
+                    price_col=price_col,
+                    now=datetime.now().astimezone(),
+                )
+                st.session_state.last_results = result_rows(all_results)
+                checkpoint_slot.dataframe(
+                    st.session_state.last_results,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=260,
+                )
+                completed_rows += len(batch)
+
+                if auto_save_github and can_sync_github:
+                    try:
+                        st.session_state.last_save_url = save_current_table_to_github(
+                            f"Checkpoint {price_col} rows {batch_start}-{batch_end}"
+                        )
+                        save_message = f" Last checkpoint saved rows {batch_start}-{batch_end}."
+                        status.write(
+                            f"Checkpoint saved rows {batch_start}-{batch_end} of {len(products)}."
+                        )
+                    except Exception as exc:
+                        save_failed = f"GitHub checkpoint save failed after rows {batch_start}-{batch_end}: {exc}"
+                        status.error(save_failed)
+                        break
 
         progress.empty()
-        status.empty()
-        result_slot.success(f"Finished {len(results)} rows into {price_col}.{save_message}")
-        st.rerun()
+        if save_failed:
+            result_slot.error(
+                f"Stopped after {completed_rows} rows into {price_col}. {save_failed}"
+            )
+        else:
+            result_slot.success(
+                f"Finished {completed_rows} rows into {price_col}.{save_message}"
+            )
 
 if not st.session_state.last_results.empty:
     st.subheader("Last Run")

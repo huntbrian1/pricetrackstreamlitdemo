@@ -16,12 +16,16 @@ from typing import Any, Callable
 
 import pandas as pd
 import requests
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
+
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+except Exception:
+    PlaywrightTimeoutError = TimeoutError
 
 
 BASE_COLUMNS = ["retailer", "brand", "color", "size", "title", "link"]
 LAST_RUN_COLUMN = "last_run"
+ROW_ID_COLUMN = "_row_id"
 PRICE_COL_SUFFIX = "_price"
 WALMART_PRODUCT_API = "https://api.scrapingdog.com/walmart/product"
 SCRAPINGDOG_GENERIC_API = "https://api.scrapingdog.com/scrape"
@@ -51,6 +55,7 @@ class Product:
     color: str
     size: str
     url: str
+    row_id: int | None = None
 
 
 @dataclass
@@ -251,6 +256,15 @@ def save_table_to_github(
 
 def products_from_df(df: pd.DataFrame) -> list[Product]:
     rows: list[Product] = []
+    source = df.copy()
+    row_ids: dict[Any, int] = {}
+    if ROW_ID_COLUMN in source.columns:
+        for idx, value in source[ROW_ID_COLUMN].items():
+            try:
+                row_ids[idx] = int(value)
+            except (TypeError, ValueError):
+                pass
+
     normalized = normalize_table(df)
     for _, row in normalized.iterrows():
         link = str(row.get("link", "") or "").strip()
@@ -263,6 +277,7 @@ def products_from_df(df: pd.DataFrame) -> list[Product]:
                 color=str(row.get("color", "") or "").strip(),
                 size=str(row.get("size", "") or "").strip(),
                 url=link,
+                row_id=row_ids.get(row.name),
             )
         )
     return rows
@@ -274,6 +289,9 @@ def filter_products(
     only_missing_price_col: str | None = None,
 ) -> list[Product]:
     normalized = normalize_table(df)
+    if ROW_ID_COLUMN in df.columns:
+        normalized[ROW_ID_COLUMN] = df[ROW_ID_COLUMN]
+
     if retailers:
         wanted = {canonical_retailer(r) for r in retailers}
         normalized = normalized[
@@ -308,8 +326,16 @@ def merge_results_into_master(
 
     for result in results:
         product = result.product
+        row_index = None
+        if product.row_id is not None:
+            candidate_index = product.row_id - 1
+            if 0 <= candidate_index < len(master):
+                row_index = candidate_index
+
         key = (product.retailer, product.brand, product.color, product.size, product.url)
-        if key in existing:
+        if row_index is not None:
+            idx = row_index
+        elif key in existing:
             idx = existing[key]
         else:
             idx = len(master)
@@ -650,6 +676,20 @@ def scrape_products(
                 progress_callback(idx, len(products), product, result)
 
     if playwright_products:
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:
+            for idx, product in playwright_products:
+                result = ScrapeResult(
+                    product=product,
+                    status="error",
+                    error=f"Playwright is not available in this deployment: {exc}",
+                )
+                results.append(result)
+                if progress_callback:
+                    progress_callback(idx, len(products), product, result)
+            return results
+
         with sync_playwright() as playwright:
             browser = launch_browser(playwright, headless=headless)
             page = browser.new_page(viewport={"width": 1366, "height": 900})
