@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,14 @@ from tracker_core import Product, df_to_csv_bytes, load_seed_csv, scrape_product
 
 
 TEST_PATH = APP_DIR / "data" / "cloud_playwright_smoke_test.csv"
+
+
+def running_on_streamlit_cloud() -> bool:
+    return (
+        Path("/mount/src").exists()
+        or os.getenv("STREAMLIT_SHARING_MODE") == "streamlit-cloud"
+        or os.getenv("HOME") == "/home/adminuser"
+    )
 
 
 def result_rows(results) -> pd.DataFrame:
@@ -82,7 +91,13 @@ with st.expander("Rows To Test", expanded=True):
         use_container_width=True,
     )
 
-headless = st.checkbox("Headless browser", value=True)
+is_cloud = running_on_streamlit_cloud()
+if is_cloud:
+    st.info("Streamlit Cloud must run Playwright headless. Headed browser mode is disabled here.")
+    headless = True
+    st.checkbox("Headless browser", value=True, disabled=True)
+else:
+    headless = st.checkbox("Headless browser", value=True)
 delay_min = st.number_input("Delay min seconds", min_value=0.0, value=3.0, step=0.5)
 delay_max = st.number_input("Delay max seconds", min_value=0.0, value=6.0, step=0.5)
 
@@ -107,15 +122,42 @@ if run_clicked:
         else:
             status_slot.write(f"{current}/{total} {product.retailer}: {result.status}")
 
-    with st.spinner("Running Playwright smoke test"):
-        results = scrape_products(
-            products,
-            scrapingdog_api_key="",
-            headless=headless,
-            delay_min_sec=float(delay_min),
-            delay_max_sec=float(delay_max),
-            progress_callback=on_progress,
+    try:
+        with st.spinner("Running Playwright smoke test"):
+            results = scrape_products(
+                products,
+                scrapingdog_api_key="",
+                headless=headless,
+                delay_min_sec=float(delay_min),
+                delay_max_sec=float(delay_max),
+                progress_callback=on_progress,
+            )
+    except Exception as exc:
+        error_df = pd.DataFrame(
+            [
+                {
+                    "retailer": "cloud_browser_launch",
+                    "brand": "",
+                    "size": "",
+                    "input_url": "",
+                    "detected_title": "",
+                    "accepted_price": None,
+                    "status": "error",
+                    "source": "playwright_launch",
+                    "raw_price_text": "",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            ]
         )
+        st.error("Playwright failed before row scraping started. Download the error CSV below.")
+        st.dataframe(error_df, hide_index=True, use_container_width=True)
+        st.download_button(
+            "Download Smoke Test Error CSV",
+            data=df_to_csv_bytes(error_df),
+            file_name=f"cloud_playwright_smoke_test_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+        st.stop()
 
     results_df = result_rows(results)
     captured = int(results_df["accepted_price"].notna().sum())
