@@ -8,11 +8,14 @@ import pandas as pd
 import streamlit as st
 
 from tracker_core import (
+    CATEGORY_COLUMN,
+    PDP_TITLE_COLUMN,
     ROW_ID_COLUMN,
     SCRAPINGDOG_RETAILERS,
     canonical_retailer,
     df_to_csv_bytes,
     df_to_xlsx_bytes,
+    discount_columns,
     filter_products,
     load_table_from_github,
     load_seed_csv,
@@ -118,14 +121,18 @@ def result_rows(results) -> pd.DataFrame:
                 "row": result.product.row_id,
                 "retailer": result.product.retailer,
                 "brand": result.product.brand,
+                "bras_bottoms": result.product.bras_bottoms,
                 "color": result.product.color,
-                "size": result.product.size,
+                "input_size": result.product.size,
+                "scraped_size": result.detected_size,
+                "title": result.product.title,
+                "pdp_title": result.title,
                 "link": result.product.url,
                 "price": result.price,
+                "discount_reported": result.discount_reported,
                 "status": result.status,
                 "source": result.source,
                 "error": result.error,
-                "raw_price_text": result.raw_price_text,
             }
         )
     return pd.DataFrame(rows)
@@ -179,9 +186,11 @@ def apply_column_filters(df: pd.DataFrame) -> pd.DataFrame:
 
     retailer_filter = st.session_state.get("filter_retailer", [])
     brand_filter = st.session_state.get("filter_brand", [])
+    category_filter = st.session_state.get("filter_bras_bottoms", [])
     color_filter = st.session_state.get("filter_color", [])
     size_filter = st.session_state.get("filter_size", [])
     title_filter = st.session_state.get("filter_title", "")
+    pdp_title_filter = st.session_state.get("filter_pdp_title", "")
     link_filter = st.session_state.get("filter_link", "")
     price_filter_col = st.session_state.get("filter_price_col", "")
     price_filter_mode = st.session_state.get("filter_price_mode", "Any")
@@ -190,12 +199,15 @@ def apply_column_filters(df: pd.DataFrame) -> pd.DataFrame:
         view = view[view["retailer"].isin(retailer_filter)]
     if brand_filter:
         view = view[view["brand"].isin(brand_filter)]
+    if category_filter:
+        view = view[view[CATEGORY_COLUMN].isin(category_filter)]
     if color_filter:
         view = view[view["color"].isin(color_filter)]
     if size_filter:
         view = view[view["size"].isin(size_filter)]
 
     view = view[contains_filter(view, "title", str(title_filter))]
+    view = view[contains_filter(view, PDP_TITLE_COLUMN, str(pdp_title_filter))]
     view = view[contains_filter(view, "link", str(link_filter))]
 
     if price_filter_col in view.columns and price_filter_mode != "Any":
@@ -333,10 +345,27 @@ with st.sidebar:
     retailer_options = sorted(
         [r for r in table_for_filters["retailer"].dropna().astype(str).unique() if r.strip()]
     )
+    collection_lane = st.radio(
+        "Collection lane",
+        [
+            "Cloud API only (Walmart/Amazon)",
+            "Local/browser lane (uploaded or local run)",
+        ],
+        index=0,
+    )
+    if collection_lane.startswith("Cloud API"):
+        retailer_choices = [
+            r for r in retailer_options if canonical_retailer(r) in SCRAPINGDOG_RETAILERS
+        ]
+        st.caption("Cloud-safe: Walmart and Amazon via ScrapingDog APIs.")
+    else:
+        retailer_choices = retailer_options
+        st.caption("Browser retailers should be run locally, then uploaded/saved to this master.")
+
     selected_retailers = st.multiselect(
         "Retailers",
-        retailer_options,
-        default=retailer_options,
+        retailer_choices,
+        default=retailer_choices,
     )
     run_visible_only = st.checkbox("Run visible filtered rows only", value=True)
     only_missing = st.checkbox("Only rows missing this price column", value=True)
@@ -385,7 +414,7 @@ m3.metric("Price columns", f"{len(price_columns(table)):,}")
 m4.metric("Latest price column", latest_price)
 
 with st.expander("Column Filters", expanded=True):
-    f1, f2, f3, f4 = st.columns(4)
+    f1, f2, f3, f4, f5 = st.columns(5)
     f1.multiselect(
         "retailer",
         filter_options(table, "retailer"),
@@ -397,26 +426,32 @@ with st.expander("Column Filters", expanded=True):
         key="filter_brand",
     )
     f3.multiselect(
+        "bras/bottoms",
+        filter_options(table, CATEGORY_COLUMN),
+        key="filter_bras_bottoms",
+    )
+    f4.multiselect(
         "color",
         filter_options(table, "color"),
         key="filter_color",
     )
-    f4.multiselect(
+    f5.multiselect(
         "size",
         filter_options(table, "size"),
         key="filter_size",
     )
 
-    f5, f6, f7, f8 = st.columns([0.28, 0.28, 0.24, 0.20])
-    f5.text_input("title contains", key="filter_title")
-    f6.text_input("link contains", key="filter_link")
+    f6, f7, f8, f9, f10 = st.columns([0.23, 0.23, 0.20, 0.19, 0.15])
+    f6.text_input("title contains", key="filter_title")
+    f7.text_input("pdp title contains", key="filter_pdp_title")
+    f8.text_input("link contains", key="filter_link")
     price_filter_options = [""] + price_columns(table)
-    f7.selectbox(
+    f9.selectbox(
         "price column",
         price_filter_options,
         key="filter_price_col",
     )
-    f8.selectbox(
+    f10.selectbox(
         "price filter",
         ["Any", "Filled", "Blank"],
         key="filter_price_mode",
@@ -430,16 +465,27 @@ price_config = {
     col: st.column_config.NumberColumn(col, format="$%.2f")
     for col in price_columns(table)
 }
+discount_config = {
+    col: st.column_config.TextColumn(col, width="small")
+    for col in discount_columns(table)
+}
 column_config = {
     ROW_ID_COLUMN: st.column_config.NumberColumn("row", width="small", disabled=True),
     "retailer": st.column_config.TextColumn("retailer", width="small"),
     "brand": st.column_config.TextColumn("brand", width="small"),
+    CATEGORY_COLUMN: st.column_config.SelectboxColumn(
+        "bras/bottoms",
+        width="small",
+        options=["", "Bras", "Bottoms"],
+    ),
     "color": st.column_config.TextColumn("color", width="small"),
     "size": st.column_config.TextColumn("size", width="small"),
-    "title": st.column_config.TextColumn("title", width="large"),
+    "title": st.column_config.TextColumn("title", width="medium"),
+    PDP_TITLE_COLUMN: st.column_config.TextColumn("pdp_title", width="large"),
     "link": st.column_config.LinkColumn("link", width="large"),
     "last_run": st.column_config.TextColumn("last_run", width="medium"),
     **price_config,
+    **discount_config,
 }
 
 edited = st.data_editor(
@@ -515,7 +561,12 @@ save_clicked = save_col.button(
     use_container_width=True,
     disabled=not can_sync_github,
 )
-run_clicked = run_col.button("Run price scrape", type="primary", use_container_width=True)
+run_button_label = (
+    "Run cloud API scrape"
+    if collection_lane.startswith("Cloud API")
+    else "Run selected scrape"
+)
+run_clicked = run_col.button(run_button_label, type="primary", use_container_width=True)
 result_slot = result_col.empty()
 checkpoint_slot = st.empty()
 

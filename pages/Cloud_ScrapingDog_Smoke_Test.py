@@ -15,8 +15,9 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from tracker_core import (  # noqa: E402
+    CATEGORY_COLUMN,
     Product,
-    df_to_csv_bytes,
+    estimate_scrapingdog_credits,
     load_seed_csv,
     scrape_amazon_scrapingdog,
     scrape_walmart_scrapingdog,
@@ -24,7 +25,6 @@ from tracker_core import (  # noqa: E402
 
 
 TEST_PATH = APP_DIR / "data" / "cloud_scrapingdog_smoke_test.csv"
-ESTIMATED_CREDITS = 5 * 5 + 5 * 10
 
 
 def get_secret(name: str) -> str:
@@ -42,8 +42,10 @@ def products_from_table(df: pd.DataFrame) -> list[Product]:
             Product(
                 retailer=str(row.get("retailer", "")),
                 brand=str(row.get("brand", "")),
+                bras_bottoms=str(row.get(CATEGORY_COLUMN, "")),
                 color=str(row.get("color", "")),
                 size=str(row.get("size", "")),
+                title=str(row.get("title", "")),
                 url=str(row.get("link", "")),
             )
         )
@@ -57,13 +59,17 @@ def result_rows(results) -> pd.DataFrame:
             {
                 "retailer": result.product.retailer,
                 "brand": result.product.brand,
-                "size": result.product.size,
+                "bras_bottoms": result.product.bras_bottoms,
+                "color": result.product.color,
+                "input_size": result.product.size,
+                "scraped_size": result.detected_size,
+                "title": result.product.title,
+                "pdp_title": result.title,
                 "input_url": result.product.url,
-                "detected_title": result.title,
                 "accepted_price": result.price,
+                "discount_reported": result.discount_reported,
                 "status": result.status,
                 "source": result.source,
-                "raw_price_text": result.raw_price_text,
                 "error": result.error,
             }
         )
@@ -118,19 +124,21 @@ if not TEST_PATH.exists():
     st.stop()
 
 test_table = load_seed_csv(TEST_PATH)
+test_products = products_from_table(test_table)
+estimated_credits = estimate_scrapingdog_credits(test_products)
 counts = test_table.groupby("retailer", dropna=False).size().reset_index(name="rows")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Test rows", len(test_table))
 c2.metric("Retailers", test_table["retailer"].nunique())
-c3.metric("Estimated credits", ESTIMATED_CREDITS)
+c3.metric("Estimated credits", estimated_credits)
 c4.metric("Last loaded", datetime.now().strftime("%H:%M:%S"))
 
 st.dataframe(counts, hide_index=True, use_container_width=True)
 
 with st.expander("Rows To Test", expanded=True):
     st.dataframe(
-        test_table[["retailer", "brand", "size", "title", "link"]],
+        test_table[["retailer", "brand", CATEGORY_COLUMN, "color", "size", "title", "link"]],
         hide_index=True,
         use_container_width=True,
     )
@@ -142,7 +150,7 @@ scrapingdog_key = st.text_input(
 )
 delay_sec = st.number_input("Delay seconds between requests", min_value=0.0, value=1.0, step=0.5)
 confirm_paid_run = st.checkbox(
-    f"Confirm ScrapingDog paid smoke test run, estimated {ESTIMATED_CREDITS} credits",
+    f"Confirm ScrapingDog paid smoke test run, estimated {estimated_credits} credits",
     value=False,
 )
 
@@ -156,18 +164,22 @@ if run_clicked:
         st.error("Check the confirmation box before spending ScrapingDog credits.")
         st.stop()
 
-    products = products_from_table(test_table)
+    products = test_products
     with st.spinner("Running ScrapingDog smoke test"):
         results = run_scrapingdog_smoke(products, scrapingdog_key, float(delay_sec))
 
     results_df = result_rows(results)
     captured = int(results_df["accepted_price"].notna().sum())
     failures = len(results_df) - captured
+    scraped_sizes = int(results_df["scraped_size"].fillna("").astype(str).str.strip().ne("").sum())
+    discounts = int(results_df["discount_reported"].fillna("").astype(str).str.strip().ne("").sum())
 
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Prices captured", f"{captured}/{len(results_df)}")
     m2.metric("Failures", failures)
-    m3.metric("Estimated credits used", ESTIMATED_CREDITS)
+    m3.metric("Sizes scraped", scraped_sizes)
+    m4.metric("Discounts reported", discounts)
+    m5.metric("Estimated credits used", estimated_credits)
 
     by_retailer = (
         results_df.assign(price_found=results_df["accepted_price"].notna())
@@ -185,7 +197,7 @@ if run_clicked:
 
     st.download_button(
         "Download ScrapingDog Smoke Test CSV",
-        data=df_to_csv_bytes(results_df),
+        data=results_df.to_csv(index=False).encode("utf-8-sig"),
         file_name=f"cloud_scrapingdog_smoke_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv",
     )

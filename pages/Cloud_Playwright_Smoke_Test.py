@@ -19,7 +19,6 @@ if str(APP_DIR) not in sys.path:
 from tracker_core import (  # noqa: E402
     Product,
     ScrapeResult,
-    df_to_csv_bytes,
     load_seed_csv,
     scrape_playwright_generic,
 )
@@ -229,7 +228,7 @@ if run_clicked:
         st.dataframe(error_df, hide_index=True, use_container_width=True)
         st.download_button(
             "Download Smoke Test Error CSV",
-            data=df_to_csv_bytes(error_df),
+            data=error_df.to_csv(index=False).encode("utf-8-sig"),
             file_name=f"cloud_playwright_smoke_test_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
         )
@@ -260,7 +259,7 @@ if run_clicked:
 
     st.download_button(
         "Download Smoke Test CSV",
-        data=df_to_csv_bytes(results_df),
+        data=results_df.to_csv(index=False).encode("utf-8-sig"),
         file_name=f"cloud_playwright_smoke_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv",
     )

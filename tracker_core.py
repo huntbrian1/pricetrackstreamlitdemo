@@ -23,14 +23,34 @@ except Exception:
     PlaywrightTimeoutError = TimeoutError
 
 
-BASE_COLUMNS = ["retailer", "brand", "color", "size", "title", "link"]
+CATEGORY_COLUMN = "bras_bottoms"
+PDP_TITLE_COLUMN = "pdp_title"
+BASE_COLUMNS = [
+    "retailer",
+    "brand",
+    CATEGORY_COLUMN,
+    "color",
+    "size",
+    "title",
+    PDP_TITLE_COLUMN,
+    "link",
+]
 LAST_RUN_COLUMN = "last_run"
 ROW_ID_COLUMN = "_row_id"
 PRICE_COL_SUFFIX = "_price"
+DISCOUNT_COL_SUFFIX = "_discount"
 WALMART_PRODUCT_API = "https://api.scrapingdog.com/walmart/product"
 AMAZON_PRODUCT_API = "https://api.scrapingdog.com/amazon/product"
 SCRAPINGDOG_GENERIC_API = "https://api.scrapingdog.com/scrape"
 GITHUB_CONTENTS_API = "https://api.github.com/repos/{repo}/contents/{path}"
+CATEGORY_ALIASES = {
+    "bra/bottoms",
+    "bras/bottoms",
+    "bra_or_bottom",
+    "bra_or_bottoms",
+    "category",
+}
+PDP_TITLE_ALIASES = {"product_title", "detected_title", "pdp title", "pdp_title"}
 
 
 PLAYWRIGHT_RETAILERS = {
@@ -56,6 +76,8 @@ class Product:
     color: str
     size: str
     url: str
+    title: str = ""
+    bras_bottoms: str = ""
     row_id: int | None = None
 
 
@@ -68,6 +90,8 @@ class ScrapeResult:
     error: str = ""
     source: str = ""
     raw_price_text: str = ""
+    detected_size: str = ""
+    discount_reported: str = ""
 
 
 class GitHubStorageError(RuntimeError):
@@ -81,6 +105,28 @@ def today_price_col(now: datetime | None = None) -> str:
 
 def price_columns(df: pd.DataFrame) -> list[str]:
     return [col for col in df.columns if str(col).endswith(PRICE_COL_SUFFIX)]
+
+
+def discount_columns(df: pd.DataFrame) -> list[str]:
+    return [col for col in df.columns if str(col).endswith(DISCOUNT_COL_SUFFIX)]
+
+
+def discount_col_for_price_col(price_col: str) -> str:
+    if price_col.endswith(PRICE_COL_SUFFIX):
+        return f"{price_col[: -len(PRICE_COL_SUFFIX)]}{DISCOUNT_COL_SUFFIX}"
+    return f"{price_col}{DISCOUNT_COL_SUFFIX}"
+
+
+def infer_bras_bottoms(*values: Any) -> str:
+    text = " ".join(str(value or "") for value in values).lower()
+    if re.search(r"\b(bra|bralette|wirefree|wireless|underwire|t-shirt bra|nursing)\b", text):
+        return "Bras"
+    if re.search(
+        r"\b(underwear|panty|panties|brief|briefs|bikini|hi-cut|high cut|boyshort|boy short)\b",
+        text,
+    ):
+        return "Bottoms"
+    return ""
 
 
 def normalize_retailer(value: Any, url: str = "") -> str:
@@ -119,6 +165,21 @@ def normalize_table(df: pd.DataFrame) -> pd.DataFrame:
     if "last_seen" in df.columns and LAST_RUN_COLUMN not in df.columns:
         df = df.rename(columns={"last_seen": LAST_RUN_COLUMN})
 
+    lower_columns = {str(col).strip().lower(): col for col in df.columns}
+    if CATEGORY_COLUMN not in df.columns:
+        for alias in CATEGORY_ALIASES:
+            source_col = lower_columns.get(alias)
+            if source_col is not None:
+                df = df.rename(columns={source_col: CATEGORY_COLUMN})
+                break
+
+    if PDP_TITLE_COLUMN not in df.columns:
+        for alias in PDP_TITLE_ALIASES:
+            source_col = lower_columns.get(alias)
+            if source_col is not None and source_col != "title":
+                df = df.rename(columns={source_col: PDP_TITLE_COLUMN})
+                break
+
     if "link" in df.columns and "url" not in df.columns:
         pass
     elif "url" in df.columns and "link" not in df.columns:
@@ -142,10 +203,25 @@ def normalize_table(df: pd.DataFrame) -> pd.DataFrame:
         for retailer, link in zip(df["retailer"], df["link"], strict=False)
     ]
     df["brand"] = df["brand"].fillna("").astype(str).str.strip()
+    df[CATEGORY_COLUMN] = df[CATEGORY_COLUMN].fillna("").astype(str).str.strip()
     df["color"] = df["color"].fillna("").astype(str).str.strip()
     df["size"] = df["size"].fillna("").astype(str).str.strip()
+    df["title"] = df["title"].fillna("").astype(str).str.strip()
+    df[PDP_TITLE_COLUMN] = df[PDP_TITLE_COLUMN].fillna("").astype(str).str.strip()
 
-    ordered = BASE_COLUMNS + price_columns(df) + [LAST_RUN_COLUMN]
+    missing_category = df[CATEGORY_COLUMN].astype(str).str.strip() == ""
+    if missing_category.any():
+        df.loc[missing_category, CATEGORY_COLUMN] = [
+            infer_bras_bottoms(title, pdp_title, link)
+            for title, pdp_title, link in zip(
+                df.loc[missing_category, "title"],
+                df.loc[missing_category, PDP_TITLE_COLUMN],
+                df.loc[missing_category, "link"],
+                strict=False,
+            )
+        ]
+
+    ordered = BASE_COLUMNS + price_columns(df) + discount_columns(df) + [LAST_RUN_COLUMN]
     return df[ordered]
 
 
@@ -275,8 +351,10 @@ def products_from_df(df: pd.DataFrame) -> list[Product]:
             Product(
                 retailer=str(row.get("retailer", "") or "").strip(),
                 brand=str(row.get("brand", "") or "").strip(),
+                bras_bottoms=str(row.get(CATEGORY_COLUMN, "") or "").strip(),
                 color=str(row.get("color", "") or "").strip(),
                 size=str(row.get("size", "") or "").strip(),
+                title=str(row.get("title", "") or "").strip(),
                 url=link,
                 row_id=row_ids.get(row.name),
             )
@@ -308,6 +386,17 @@ def filter_products(
     return products_from_df(normalized)
 
 
+def estimate_scrapingdog_credits(products: list[Product]) -> int:
+    credits = 0
+    for product in products:
+        retailer = canonical_retailer(product.retailer)
+        if "walmart" in retailer:
+            credits += 5
+        elif "amazon" in retailer:
+            credits += 10
+    return credits
+
+
 def merge_results_into_master(
     df: pd.DataFrame,
     results: list[ScrapeResult],
@@ -316,10 +405,13 @@ def merge_results_into_master(
 ) -> pd.DataFrame:
     now = now or datetime.now(timezone.utc)
     master = normalize_table(df)
+    discount_col = discount_col_for_price_col(price_col)
     if price_col not in master.columns:
         master[price_col] = ""
+    if discount_col not in master.columns:
+        master[discount_col] = ""
 
-    key_cols = ["retailer", "brand", "color", "size", "link"]
+    key_cols = ["retailer", "brand", CATEGORY_COLUMN, "color", "size", "link"]
     existing = {
         tuple(str(row.get(col, "") or "").strip() for col in key_cols): idx
         for idx, row in master.iterrows()
@@ -333,7 +425,14 @@ def merge_results_into_master(
             if 0 <= candidate_index < len(master):
                 row_index = candidate_index
 
-        key = (product.retailer, product.brand, product.color, product.size, product.url)
+        key = (
+            product.retailer,
+            product.brand,
+            product.bras_bottoms,
+            product.color,
+            product.size,
+            product.url,
+        )
         if row_index is not None:
             idx = row_index
         elif key in existing:
@@ -343,10 +442,13 @@ def merge_results_into_master(
             master.loc[idx, key_cols] = list(key)
             existing[key] = idx
 
+        if product.title and not str(master.at[idx, "title"] or "").strip():
+            master.at[idx, "title"] = product.title
         if result.title:
-            master.at[idx, "title"] = result.title
+            master.at[idx, PDP_TITLE_COLUMN] = result.title
         master.at[idx, LAST_RUN_COLUMN] = now.isoformat(timespec="seconds")
         master.at[idx, price_col] = "" if result.price is None else result.price
+        master.at[idx, discount_col] = result.discount_reported or ""
 
     return normalize_table(master)
 
@@ -391,6 +493,136 @@ def walk_json(value: Any) -> list[Any]:
         for item in value:
             values.extend(walk_json(item))
     return values
+
+
+def compact_discount(value: Any) -> str:
+    text = normalize_text(str(value or ""))
+    if not text:
+        return ""
+    percent = re.search(r"([0-9]{1,3}(?:\.[0-9]+)?)\s*(?:%|percent)", text, flags=re.I)
+    if percent:
+        number = percent.group(1).rstrip("0").rstrip(".")
+        return f"{number}%"
+    money = re.search(r"\$[0-9]{1,4}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?", text)
+    if money:
+        return money.group(0)
+    return text[:80]
+
+
+def discount_from_prices(current: float | None, previous: Any) -> str:
+    previous_price = parse_price(previous)
+    if current is None or previous_price is None or previous_price <= current:
+        return ""
+    savings_pct = ((previous_price - current) / previous_price) * 100
+    if savings_pct <= 0:
+        return ""
+    return f"{savings_pct:.1f}%".replace(".0%", "%")
+
+
+def discount_from_json(data: dict[str, Any], current_price: float | None = None) -> str:
+    preferred_keys = (
+        "median_price_savings_percentage",
+        "savings_percentage",
+        "discount_percentage",
+        "discount_percent",
+        "percent_off",
+        "savings",
+        "discount",
+        "you_save",
+    )
+    for key in preferred_keys:
+        value = data.get(key)
+        discount = compact_discount(value)
+        if discount:
+            return discount
+
+    for previous_key in ("previous_price", "regular_price", "list_price", "was_price", "strike_price"):
+        discount = discount_from_prices(current_price, data.get(previous_key))
+        if discount:
+            return discount
+
+    for node in walk_json(data):
+        if not isinstance(node, dict):
+            continue
+        for key, value in node.items():
+            key_text = str(key).lower()
+            if any(token in key_text for token in ("saving", "discount", "percent_off")):
+                discount = compact_discount(value)
+                if discount:
+                    return discount
+    return ""
+
+
+def clean_size_candidate(value: Any) -> str:
+    text = normalize_text(str(value or ""))
+    if not text or len(text) > 40:
+        return ""
+    if re.search(r"\b\d+(?:\.\d+)?\s*(?:in|inch|inches|cm|mm)\b", text, flags=re.I):
+        return ""
+    if re.search(r"\d+\s*[xX]\s*\d+", text):
+        return ""
+    bad_terms = ("dimension", "department", "model", "weight", "package", "care", "origin")
+    if any(term in text.lower() for term in bad_terms):
+        return ""
+    return text
+
+
+def extract_reported_size_from_json(data: dict[str, Any]) -> str:
+    direct_keys = (
+        "size",
+        "selected_size",
+        "size_name",
+        "clothing_size",
+        "apparel_size",
+        "variant_size",
+    )
+    for key in direct_keys:
+        size = clean_size_candidate(data.get(key))
+        if size:
+            return size
+
+    product_info = data.get("product_information")
+    if isinstance(product_info, dict):
+        for key, value in product_info.items():
+            key_text = str(key).strip().lower()
+            if key_text in {"size", "size name", "clothing size"}:
+                size = clean_size_candidate(value)
+                if size:
+                    return size
+
+    for node in walk_json(data):
+        if not isinstance(node, dict):
+            continue
+        label = normalize_text(
+            str(
+                node.get("name")
+                or node.get("label")
+                or node.get("dimension")
+                or node.get("variant")
+                or ""
+            )
+        ).lower()
+        if "size" not in label:
+            continue
+
+        for value_key in ("selected_value", "selectedValue", "current_value", "value", "display_value"):
+            size = clean_size_candidate(node.get(value_key))
+            if size:
+                return size
+
+        values = node.get("values")
+        if isinstance(values, list):
+            for value in values:
+                if not isinstance(value, dict):
+                    continue
+                selected = value.get("selected") or value.get("is_selected") or value.get("current")
+                if selected:
+                    size = clean_size_candidate(
+                        value.get("name") or value.get("value") or value.get("display_value")
+                    )
+                    if size:
+                        return size
+    return ""
 
 
 def parse_jsonld_for_price(markup: str) -> tuple[float | None, str, str]:
@@ -556,6 +788,8 @@ def scrape_walmart_scrapingdog(product: Product, api_key: str) -> ScrapeResult:
         return ScrapeResult(product=product, status="error", error="ScrapingDog returned non-JSON")
 
     product_data = data.get("product_results") or {}
+    if not isinstance(product_data, dict):
+        product_data = {}
     title = normalize_text(product_data.get("title") or "")
     raw = ""
     price = None
@@ -575,6 +809,9 @@ def scrape_walmart_scrapingdog(product: Product, api_key: str) -> ScrapeResult:
         raw = str(product_data.get("price") or "")
         price = parse_price(raw)
 
+    detected_size = extract_reported_size_from_json(product_data)
+    discount_reported = discount_from_json(product_data, price)
+
     return ScrapeResult(
         product=product,
         title=title,
@@ -583,6 +820,8 @@ def scrape_walmart_scrapingdog(product: Product, api_key: str) -> ScrapeResult:
         error="" if price is not None else "Price not found in ScrapingDog Walmart response",
         source="scrapingdog_walmart",
         raw_price_text=raw,
+        detected_size=detected_size,
+        discount_reported=discount_reported,
     )
 
 
@@ -659,6 +898,8 @@ def scrape_amazon_scrapingdog(product: Product, api_key: str) -> ScrapeResult:
 
     title = normalize_text(data.get("title") or "")
     price, raw, path = extract_amazon_product_api_price(data)
+    detected_size = extract_reported_size_from_json(data)
+    discount_reported = discount_from_json(data, price)
 
     return ScrapeResult(
         product=product,
@@ -668,6 +909,8 @@ def scrape_amazon_scrapingdog(product: Product, api_key: str) -> ScrapeResult:
         error="" if price is not None else "Price not found in ScrapingDog Amazon Product API response",
         source="scrapingdog_amazon_product",
         raw_price_text=f"{path}: {raw}" if path and raw else raw,
+        detected_size=detected_size,
+        discount_reported=discount_reported,
     )
 
 
