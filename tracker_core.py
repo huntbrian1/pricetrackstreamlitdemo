@@ -939,10 +939,18 @@ def scrape_products(
             continue
 
         if retailer in SCRAPINGDOG_RETAILERS:
-            if "walmart" in retailer:
-                result = scrape_walmart_scrapingdog(product, scrapingdog_api_key)
-            else:
-                result = scrape_amazon_scrapingdog(product, scrapingdog_api_key)
+            try:
+                if "walmart" in retailer:
+                    result = scrape_walmart_scrapingdog(product, scrapingdog_api_key)
+                else:
+                    result = scrape_amazon_scrapingdog(product, scrapingdog_api_key)
+            except Exception as exc:
+                result = ScrapeResult(
+                    product=product,
+                    status="error",
+                    error=f"{type(exc).__name__}: {exc}",
+                    source="scrapingdog_exception",
+                )
             results.append(result)
             if progress_callback:
                 progress_callback(idx, len(products), product, result)
@@ -971,18 +979,55 @@ def scrape_products(
                     progress_callback(idx, len(products), product, result)
             return results
 
-        with sync_playwright() as playwright:
-            browser = launch_browser(playwright, headless=headless)
+        browser = None
+        try:
+            playwright_context = sync_playwright().start()
+            browser = launch_browser(playwright_context, headless=headless)
+        except Exception as exc:
+            for idx, product in playwright_products:
+                result = ScrapeResult(
+                    product=product,
+                    status="error",
+                    error=f"Playwright browser launch failed: {type(exc).__name__}: {exc}",
+                    source="playwright_launch",
+                )
+                results.append(result)
+                if progress_callback:
+                    progress_callback(idx, len(products), product, result)
+            if "playwright_context" in locals():
+                try:
+                    playwright_context.stop()
+                except Exception:
+                    pass
+            return results
+
+        try:
             page = browser.new_page(viewport={"width": 1366, "height": 900})
             try:
                 for idx, product in playwright_products:
                     delay = random.uniform(delay_min_sec, delay_max_sec)
                     time.sleep(delay)
-                    result = scrape_playwright_generic(page, product)
+                    try:
+                        result = scrape_playwright_generic(page, product)
+                    except Exception as exc:
+                        result = ScrapeResult(
+                            product=product,
+                            status="error",
+                            error=f"{type(exc).__name__}: {exc}",
+                            source="playwright_exception",
+                        )
                     results.append(result)
                     if progress_callback:
                         progress_callback(idx, len(products), product, result)
             finally:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+        finally:
+            try:
+                playwright_context.stop()
+            except Exception:
+                pass
 
     return results

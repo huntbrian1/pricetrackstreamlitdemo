@@ -12,6 +12,7 @@ from tracker_core import (
     PDP_TITLE_COLUMN,
     ROW_ID_COLUMN,
     SCRAPINGDOG_RETAILERS,
+    ScrapeResult,
     canonical_retailer,
     df_to_csv_bytes,
     df_to_xlsx_bytes,
@@ -191,9 +192,6 @@ def apply_column_filters(df: pd.DataFrame) -> pd.DataFrame:
     size_filter = st.session_state.get("filter_size", [])
     title_filter = st.session_state.get("filter_title", "")
     pdp_title_filter = st.session_state.get("filter_pdp_title", "")
-    link_filter = st.session_state.get("filter_link", "")
-    price_filter_col = st.session_state.get("filter_price_col", "")
-    price_filter_mode = st.session_state.get("filter_price_mode", "Any")
 
     if retailer_filter:
         view = view[view["retailer"].isin(retailer_filter)]
@@ -208,13 +206,6 @@ def apply_column_filters(df: pd.DataFrame) -> pd.DataFrame:
 
     view = view[contains_filter(view, "title", str(title_filter))]
     view = view[contains_filter(view, PDP_TITLE_COLUMN, str(pdp_title_filter))]
-    view = view[contains_filter(view, "link", str(link_filter))]
-
-    if price_filter_col in view.columns and price_filter_mode != "Any":
-        filled = view[price_filter_col].notna() & (
-            view[price_filter_col].astype(str).str.strip() != ""
-        )
-        view = view[filled] if price_filter_mode == "Filled" else view[~filled]
 
     return view
 
@@ -334,12 +325,6 @@ with st.sidebar:
         value=get_secret("SCRAPINGDOG_API_KEY"),
         type="password",
     )
-    headless = st.checkbox("Headless browser", value=True)
-
-    delay_min = st.number_input("Delay min seconds", min_value=0.0, value=3.0, step=0.5)
-    delay_max = st.number_input("Delay max seconds", min_value=0.0, value=6.0, step=0.5)
-    if delay_max < delay_min:
-        st.warning("Max delay must be at least min delay.")
 
     table_for_filters = normalize_table(st.session_state.price_table)
     retailer_options = sorted(
@@ -353,13 +338,22 @@ with st.sidebar:
         ],
         index=0,
     )
-    if collection_lane.startswith("Cloud API"):
+    cloud_api_lane = collection_lane.startswith("Cloud API")
+    if cloud_api_lane:
         retailer_choices = [
             r for r in retailer_options if canonical_retailer(r) in SCRAPINGDOG_RETAILERS
         ]
-        st.caption("Cloud-safe: Walmart and Amazon via ScrapingDog APIs.")
+        headless = True
+        delay_min = 0.0
+        delay_max = 0.0
+        st.caption("Cloud-safe: Walmart and Amazon via ScrapingDog APIs. No browser settings are used.")
     else:
         retailer_choices = retailer_options
+        headless = st.checkbox("Headless browser", value=True)
+        delay_min = st.number_input("Delay min seconds", min_value=0.0, value=3.0, step=0.5)
+        delay_max = st.number_input("Delay max seconds", min_value=0.0, value=6.0, step=0.5)
+        if delay_max < delay_min:
+            st.warning("Max delay must be at least min delay.")
         st.caption("Browser retailers should be run locally, then uploaded/saved to this master.")
 
     selected_retailers = st.multiselect(
@@ -441,21 +435,9 @@ with st.expander("Column Filters", expanded=True):
         key="filter_size",
     )
 
-    f6, f7, f8, f9, f10 = st.columns([0.23, 0.23, 0.20, 0.19, 0.15])
+    f6, f7 = st.columns(2)
     f6.text_input("title contains", key="filter_title")
     f7.text_input("pdp title contains", key="filter_pdp_title")
-    f8.text_input("link contains", key="filter_link")
-    price_filter_options = [""] + price_columns(table)
-    f9.selectbox(
-        "price column",
-        price_filter_options,
-        key="filter_price_col",
-    )
-    f10.selectbox(
-        "price filter",
-        ["Any", "Filled", "Blank"],
-        key="filter_price_mode",
-    )
 
 filtered_view = apply_column_filters(table)
 filtered_export = table_without_row_ids(filtered_view)
@@ -624,14 +606,27 @@ if run_clicked:
                             f"(batch {batch_number}/{len(batches)})"
                         )
 
-                batch_results = scrape_products(
-                    batch,
-                    scrapingdog_api_key=scrapingdog_key,
-                    headless=headless,
-                    delay_min_sec=float(delay_min),
-                    delay_max_sec=float(delay_max),
-                    progress_callback=on_progress,
-                )
+                batch_exception = ""
+                try:
+                    batch_results = scrape_products(
+                        batch,
+                        scrapingdog_api_key=scrapingdog_key,
+                        headless=headless,
+                        delay_min_sec=float(delay_min),
+                        delay_max_sec=float(delay_max),
+                        progress_callback=on_progress,
+                    )
+                except Exception as exc:
+                    batch_exception = f"{type(exc).__name__}: {exc}"
+                    batch_results = [
+                        ScrapeResult(
+                            product=product,
+                            status="error",
+                            error=batch_exception,
+                            source="batch_exception",
+                        )
+                        for product in batch
+                    ]
 
                 all_results.extend(batch_results)
                 st.session_state.price_table = merge_results_into_master(
@@ -662,6 +657,14 @@ if run_clicked:
                         save_failed = f"GitHub checkpoint save failed after rows {batch_start}-{batch_end}: {exc}"
                         status.error(save_failed)
                         break
+
+                if batch_exception:
+                    save_failed = (
+                        f"Batch scrape failed on rows {batch_start}-{batch_end}: {batch_exception}. "
+                        "Error rows were written before stopping."
+                    )
+                    status.error(save_failed)
+                    break
 
         progress.empty()
         if save_failed:

@@ -88,12 +88,22 @@ def run_scrapingdog_smoke(products: list[Product], api_key: str, delay_sec: floa
             time.sleep(delay_sec)
 
         retailer = product.retailer.strip().lower()
-        if "walmart" in retailer:
-            result = scrape_walmart_scrapingdog(product, api_key)
-        elif "amazon" in retailer:
-            result = scrape_amazon_scrapingdog(product, api_key)
-        else:
-            result = None
+        try:
+            if "walmart" in retailer:
+                result = scrape_walmart_scrapingdog(product, api_key)
+            elif "amazon" in retailer:
+                result = scrape_amazon_scrapingdog(product, api_key)
+            else:
+                result = None
+        except Exception as exc:
+            from tracker_core import ScrapeResult
+
+            result = ScrapeResult(
+                product=product,
+                status="error",
+                source="smoke_exception",
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
         if result is None:
             from tracker_core import ScrapeResult
@@ -125,13 +135,12 @@ if not TEST_PATH.exists():
 
 test_table = load_seed_csv(TEST_PATH)
 test_products = products_from_table(test_table)
-estimated_credits = estimate_scrapingdog_credits(test_products)
 counts = test_table.groupby("retailer", dropna=False).size().reset_index(name="rows")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Test rows", len(test_table))
 c2.metric("Retailers", test_table["retailer"].nunique())
-c3.metric("Estimated credits", estimated_credits)
+c3.metric("Full batch credits", estimate_scrapingdog_credits(test_products))
 c4.metric("Last loaded", datetime.now().strftime("%H:%M:%S"))
 
 st.dataframe(counts, hide_index=True, use_container_width=True)
@@ -149,6 +158,19 @@ scrapingdog_key = st.text_input(
     type="password",
 )
 delay_sec = st.number_input("Delay seconds between requests", min_value=0.0, value=1.0, step=0.5)
+max_test_rows = st.number_input(
+    "Max rows to test",
+    min_value=1,
+    max_value=max(len(test_products), 1),
+    value=min(2, max(len(test_products), 1)),
+    step=1,
+)
+products_to_run = test_products[: int(max_test_rows)]
+estimated_credits = estimate_scrapingdog_credits(products_to_run)
+st.caption(
+    f"Selected smoke run: {len(products_to_run)} of {len(test_products)} rows, "
+    f"estimated {estimated_credits} credits."
+)
 confirm_paid_run = st.checkbox(
     f"Confirm ScrapingDog paid smoke test run, estimated {estimated_credits} credits",
     value=False,
@@ -164,7 +186,7 @@ if run_clicked:
         st.error("Check the confirmation box before spending ScrapingDog credits.")
         st.stop()
 
-    products = test_products
+    products = products_to_run
     with st.spinner("Running ScrapingDog smoke test"):
         results = run_scrapingdog_smoke(products, scrapingdog_key, float(delay_sec))
 
