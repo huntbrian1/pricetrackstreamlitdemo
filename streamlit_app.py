@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from tracker_core import (
 APP_DIR = Path(__file__).resolve().parent
 IMPORT_PATH = APP_DIR / "data" / "retail_wip_links_import.csv"
 DEMO_PATH = APP_DIR / "data" / "demo_price_master.csv"
+LOGO_PATH = APP_DIR / "assets" / "hanes-logo.png"
 DEFAULT_GITHUB_REPO = "huntbrian1/pricetrackstreamlitdemo"
 DEFAULT_GITHUB_BRANCH = "main"
 DEFAULT_GITHUB_DATA_PATH = "data/retail_wip_links_import.csv"
@@ -96,6 +98,10 @@ def reset_to_github() -> None:
     st.session_state.github_status = f"Loaded GitHub master from {config['repo']}/{config['path']}"
 
 
+def table_fingerprint(df: pd.DataFrame) -> str:
+    return hashlib.sha256(df_to_csv_bytes(df)).hexdigest()
+
+
 def save_current_table_to_github(message: str) -> str:
     config = github_config()
     if not github_ready(config):
@@ -111,6 +117,7 @@ def save_current_table_to_github(message: str) -> str:
     st.session_state.github_status = (
         f"Saved GitHub master to {config['repo']}/{config['path']}"
     )
+    st.session_state.last_saved_table_hash = table_fingerprint(st.session_state.price_table)
     return str(html_url)
 
 
@@ -278,11 +285,24 @@ if "github_status" not in st.session_state:
     st.session_state.github_status = ""
 if "last_save_url" not in st.session_state:
     st.session_state.last_save_url = ""
+if "last_saved_table_hash" not in st.session_state:
+    st.session_state.last_saved_table_hash = table_fingerprint(st.session_state.price_table)
 
 with st.sidebar:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=150)
     st.header("Price Tracker")
 
+    config = github_config()
+    can_sync_github = github_ready(config)
+
     uploaded = st.file_uploader("Reupload master table", type=["csv", "xlsx", "xls"])
+    auto_save_uploads_github = st.checkbox(
+        "Auto-save uploads to GitHub",
+        value=can_sync_github,
+        disabled=not can_sync_github,
+        help="When enabled, uploaded CSV/XLSX tables are saved to the GitHub master immediately.",
+    )
     if uploaded is not None:
         upload_id = (uploaded.name, uploaded.size)
         if st.session_state.upload_id != upload_id:
@@ -294,15 +314,20 @@ with st.sidebar:
                 st.session_state.upload_id = upload_id
                 st.session_state.last_results = pd.DataFrame()
                 st.success(f"Loaded {uploaded.name}")
+                if auto_save_uploads_github and can_sync_github:
+                    try:
+                        st.session_state.last_save_url = save_current_table_to_github(
+                            f"Auto-save uploaded master {uploaded.name} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        st.success("Uploaded table saved to GitHub.")
+                    except Exception as exc:
+                        st.error(f"Uploaded table loaded, but GitHub auto-save failed: {exc}")
             except Exception as exc:
                 st.error(f"Could not load upload: {exc}")
 
     if st.button("Load workbook import", use_container_width=True):
         reset_to_seed(IMPORT_PATH)
         st.rerun()
-
-    config = github_config()
-    can_sync_github = github_ready(config)
 
     if st.button("Load saved GitHub master", use_container_width=True, disabled=not can_sync_github):
         try:
@@ -363,19 +388,29 @@ with st.sidebar:
     )
     run_visible_only = st.checkbox("Run visible filtered rows only", value=True)
     only_missing = st.checkbox("Only rows missing this price column", value=True)
-    checkpoint_rows = st.number_input(
-        "Checkpoint save every rows",
-        min_value=1,
-        max_value=500,
-        value=75,
-        step=5,
-    )
+    if cloud_api_lane:
+        checkpoint_rows = st.number_input(
+            "Checkpoint save every rows",
+            min_value=1,
+            max_value=25,
+            value=1,
+            step=1,
+            help="Cloud API runs save after each small batch. Keep this at 1 for safest persistence.",
+        )
+    else:
+        checkpoint_rows = st.number_input(
+            "Checkpoint save every rows",
+            min_value=1,
+            max_value=500,
+            value=25,
+            step=5,
+        )
     max_rows_this_run = st.number_input(
         "Max rows this run (0 = all)",
         min_value=0,
         max_value=5000,
-        value=75,
-        step=25,
+        value=10 if cloud_api_lane else 75,
+        step=10 if cloud_api_lane else 25,
     )
     confirm_paid_run = st.checkbox("Confirm paid ScrapingDog run")
 
@@ -385,6 +420,12 @@ with st.sidebar:
         "Auto-save GitHub master after scrape",
         value=can_sync_github,
         disabled=not can_sync_github,
+    )
+    auto_save_edits_github = st.checkbox(
+        "Auto-save table edits to GitHub",
+        value=False,
+        disabled=not can_sync_github,
+        help="Saves changed table cells after the editor updates. Keep off if several people are editing at once.",
     )
     allow_session_only_run = False
     if can_sync_github:
@@ -408,7 +449,12 @@ with st.sidebar:
     if st.session_state.last_save_url:
         st.caption(f"[Last GitHub save]({st.session_state.last_save_url})")
 
-st.title("Hanes Price Tracker")
+if LOGO_PATH.exists():
+    logo_col, title_col = st.columns([0.12, 0.88], vertical_alignment="center")
+    logo_col.image(str(LOGO_PATH), width=105)
+    title_col.title("Hanes Price Tracker")
+else:
+    st.title("Hanes Price Tracker")
 
 table = normalize_table(st.session_state.price_table)
 latest_price = price_columns(table)[-1] if price_columns(table) else "none"
@@ -482,6 +528,7 @@ column_config = {
     **discount_config,
 }
 
+pre_editor_hash = table_fingerprint(table)
 edited = st.data_editor(
     filtered_view,
     hide_index=True,
@@ -495,6 +542,21 @@ edited = st.data_editor(
 st.session_state.price_table = merge_editor_view_into_master(table, edited)
 
 current_table = normalize_table(st.session_state.price_table)
+current_table_hash = table_fingerprint(current_table)
+if (
+    auto_save_edits_github
+    and can_sync_github
+    and current_table_hash != pre_editor_hash
+    and current_table_hash != st.session_state.last_saved_table_hash
+):
+    try:
+        st.session_state.last_save_url = save_current_table_to_github(
+            f"Auto-save table edits {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        st.toast("Saved table edit to GitHub.")
+    except Exception as exc:
+        st.warning(f"Auto-save edit failed: {exc}")
+
 current_filtered_export = table_without_row_ids(apply_column_filters(current_table))
 e1, e2, e3, e4, e5 = st.columns([0.17, 0.17, 0.17, 0.17, 0.32], vertical_alignment="center")
 e1.download_button(
