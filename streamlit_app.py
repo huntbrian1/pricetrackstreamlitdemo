@@ -197,6 +197,49 @@ def table_without_row_ids(df: pd.DataFrame) -> pd.DataFrame:
     return normalize_table(df.drop(columns=[ROW_ID_COLUMN], errors="ignore"))
 
 
+def coalesce_uploaded_table(master_df: pd.DataFrame, uploaded_df: pd.DataFrame) -> pd.DataFrame:
+    master = normalize_table(master_df).copy()
+    uploaded = normalize_table(uploaded_df).copy()
+    key_cols = ["retailer", "brand", CATEGORY_COLUMN, "color", "size", "link"]
+
+    for col in uploaded.columns:
+        if col not in master.columns:
+            master[col] = ""
+    for col in master.columns:
+        if col not in uploaded.columns:
+            uploaded[col] = ""
+
+    uploaded = uploaded[master.columns]
+    exact_index = {
+        tuple(str(row.get(col, "") or "").strip() for col in key_cols): idx
+        for idx, row in master.iterrows()
+    }
+    master_link_counts = master["link"].fillna("").astype(str).str.strip().value_counts()
+    upload_link_counts = uploaded["link"].fillna("").astype(str).str.strip().value_counts()
+
+    for _, row in uploaded.iterrows():
+        key = tuple(str(row.get(col, "") or "").strip() for col in key_cols)
+        link = str(row.get("link", "") or "").strip()
+        idx = exact_index.get(key)
+
+        if idx is None and link and master_link_counts.get(link, 0) == 1 and upload_link_counts.get(link, 0) == 1:
+            idx = master.index[master["link"].fillna("").astype(str).str.strip() == link][0]
+
+        if idx is None:
+            idx = len(master)
+            master.loc[idx, master.columns] = ""
+
+        for col in uploaded.columns:
+            value = row.get(col, "")
+            if str(value or "").strip() != "":
+                master.at[idx, col] = value
+
+        updated_key = tuple(str(master.at[idx, col] or "").strip() for col in key_cols)
+        exact_index[updated_key] = idx
+
+    return normalize_table(master)
+
+
 def apply_column_filters(df: pd.DataFrame) -> pd.DataFrame:
     view = add_row_ids(df)
 
@@ -310,7 +353,7 @@ with st.sidebar:
     config = github_config()
     can_sync_github = github_ready(config)
 
-    uploaded = st.file_uploader("Reupload master table", type=["csv", "xlsx", "xls"])
+    uploaded = st.file_uploader("Upload / merge local results", type=["csv", "xlsx", "xls"])
     auto_save_uploads_github = st.checkbox(
         "Auto-save uploads to GitHub",
         value=can_sync_github,
@@ -322,12 +365,21 @@ with st.sidebar:
         if st.session_state.upload_id != upload_id:
             try:
                 if uploaded.name.lower().endswith((".xlsx", ".xls")):
-                    st.session_state.price_table = normalize_table(pd.read_excel(uploaded))
+                    uploaded_table = pd.read_excel(uploaded)
                 else:
-                    st.session_state.price_table = normalize_table(pd.read_csv(uploaded))
+                    uploaded_table = pd.read_csv(uploaded)
+                before_rows = len(normalize_table(st.session_state.price_table))
+                st.session_state.price_table = coalesce_uploaded_table(
+                    st.session_state.price_table,
+                    uploaded_table,
+                )
+                after_rows = len(normalize_table(st.session_state.price_table))
                 st.session_state.upload_id = upload_id
                 st.session_state.last_results = pd.DataFrame()
-                st.success(f"Loaded {uploaded.name}")
+                st.success(
+                    f"Merged {uploaded.name} into the master table. "
+                    f"Rows before: {before_rows:,}; rows after: {after_rows:,}."
+                )
                 if auto_save_uploads_github and can_sync_github:
                     try:
                         st.session_state.last_save_url = save_current_table_to_github(
@@ -395,8 +447,8 @@ with st.sidebar:
         st.info(
             "Unfortunately, Target, Dollar General, TJ Maxx, JCPenney, and other browser-rendered "
             "retailers do not run reliably inside Streamlit Cloud. These websites are still able "
-            "to be run locally; run the local browser script, export the CSV/XLSX, upload it here, "
-            "then save to GitHub."
+            "to be run locally, and these retailers are run for free; run the local browser script, "
+            "export the CSV/XLSX, upload it here, then save to GitHub."
         )
         if not is_streamlit_cloud:
             headless = st.checkbox("Headless browser", value=True)
