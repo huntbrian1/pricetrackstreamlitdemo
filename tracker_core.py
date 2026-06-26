@@ -208,6 +208,8 @@ def normalize_table(df: pd.DataFrame) -> pd.DataFrame:
     df["size"] = df["size"].fillna("").astype(str).str.strip()
     df["title"] = df["title"].fillna("").astype(str).str.strip()
     df[PDP_TITLE_COLUMN] = df[PDP_TITLE_COLUMN].fillna("").astype(str).str.strip()
+    for col in price_columns(df) + discount_columns(df):
+        df[col] = df[col].astype("object")
 
     missing_category = df[CATEGORY_COLUMN].astype(str).str.strip() == ""
     if missing_category.any():
@@ -410,6 +412,8 @@ def merge_results_into_master(
         master[price_col] = ""
     if discount_col not in master.columns:
         master[discount_col] = ""
+    master[price_col] = master[price_col].astype("object")
+    master[discount_col] = master[discount_col].astype("object")
 
     key_cols = ["retailer", "brand", CATEGORY_COLUMN, "color", "size", "link"]
     existing = {
