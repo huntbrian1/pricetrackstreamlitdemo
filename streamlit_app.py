@@ -386,10 +386,22 @@ with st.sidebar:
         value=can_sync_github,
         disabled=not can_sync_github,
     )
+    allow_session_only_run = False
     if can_sync_github:
         st.caption(f"GitHub file: `{config['repo']}/{config['path']}`")
+        if not auto_save_github:
+            allow_session_only_run = st.checkbox(
+                "Allow run without GitHub auto-save",
+                value=False,
+                help="Results will update this browser session only. Download the updated full table after the run.",
+            )
     else:
         st.caption("GitHub auto-save needs `GITHUB_TOKEN` in Streamlit Secrets.")
+        allow_session_only_run = st.checkbox(
+            "Allow session-only run, then download/export",
+            value=False,
+            help="Results will not survive an app reload unless you download the updated full table.",
+        )
 
     if st.session_state.github_status:
         st.caption(st.session_state.github_status)
@@ -575,14 +587,20 @@ if run_clicked:
         result_slot.error("ScrapingDog key is required for Walmart and Amazon rows.")
     elif needs_scrapingdog and not confirm_paid_run:
         result_slot.error("Check Confirm paid ScrapingDog run before running Walmart or Amazon rows.")
-    elif needs_scrapingdog and (not auto_save_github or not can_sync_github):
-        result_slot.error("Paid ScrapingDog runs require GitHub auto-save so checkpoint results persist.")
+    elif needs_scrapingdog and not auto_save_github and not allow_session_only_run:
+        result_slot.error(
+            "Enable GitHub auto-save, or check the session-only run box and download/export after the run."
+        )
     else:
         progress = st.progress(0)
         status = st.empty()
         all_results = []
         completed_rows = 0
-        save_message = ""
+        save_message = (
+            ""
+            if auto_save_github and can_sync_github
+            else " Results are session-only until you download/export or configure GitHub save."
+        )
         save_failed = ""
 
         batches = batched(products, int(checkpoint_rows))
@@ -683,4 +701,27 @@ if not st.session_state.last_results.empty:
         hide_index=True,
         use_container_width=True,
         height=260,
+    )
+    latest_table = normalize_table(st.session_state.price_table)
+    dl1, dl2, dl3 = st.columns(3)
+    dl1.download_button(
+        "Download Updated Full CSV",
+        data=df_to_csv_bytes(latest_table),
+        file_name=f"hanes_price_master_updated_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    dl2.download_button(
+        "Download Updated Full Excel",
+        data=df_to_xlsx_bytes(latest_table),
+        file_name=f"hanes_price_master_updated_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+    dl3.download_button(
+        "Download Last Run CSV",
+        data=st.session_state.last_results.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"hanes_last_run_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+        use_container_width=True,
     )
