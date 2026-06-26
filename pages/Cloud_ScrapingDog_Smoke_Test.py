@@ -109,7 +109,7 @@ st.set_page_config(page_title="Cloud ScrapingDog Smoke Test", layout="wide")
 st.title("Cloud ScrapingDog Smoke Test")
 
 st.caption(
-    "Runs a small Walmart/Amazon ScrapingDog-only batch in the current Streamlit deployment. "
+    "Runs a small Walmart Product API / Amazon Product API ScrapingDog batch in the current Streamlit deployment. "
     "No Playwright browser is used, and this does not save to GitHub or update the master table."
 )
 

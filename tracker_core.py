@@ -28,6 +28,7 @@ LAST_RUN_COLUMN = "last_run"
 ROW_ID_COLUMN = "_row_id"
 PRICE_COL_SUFFIX = "_price"
 WALMART_PRODUCT_API = "https://api.scrapingdog.com/walmart/product"
+AMAZON_PRODUCT_API = "https://api.scrapingdog.com/amazon/product"
 SCRAPINGDOG_GENERIC_API = "https://api.scrapingdog.com/scrape"
 GITHUB_CONTENTS_API = "https://api.github.com/repos/{repo}/contents/{path}"
 
@@ -585,17 +586,51 @@ def scrape_walmart_scrapingdog(product: Product, api_key: str) -> ScrapeResult:
     )
 
 
+def extract_amazon_product_api_price(data: dict[str, Any]) -> tuple[float | None, str, str]:
+    price_keys = ("price", "current_price", "buybox_price", "sale_price", "deal_price", "our_price")
+
+    def parse_candidate(path: str, value: Any) -> tuple[float | None, str, str]:
+        if value in (None, ""):
+            return None, "", ""
+        price = parse_price(value)
+        if price is not None:
+            return price, str(value), path
+        return None, "", ""
+
+    for key in price_keys:
+        price, raw, path = parse_candidate(key, data.get(key))
+        if price is not None:
+            return price, raw, path
+
+    for container_key in ("buybox", "buying_options", "purchase_options"):
+        container = data.get(container_key)
+        if isinstance(container, dict):
+            for key in price_keys:
+                price, raw, path = parse_candidate(f"{container_key}.{key}", container.get(key))
+                if price is not None:
+                    return price, raw, path
+        elif isinstance(container, list):
+            for idx, item in enumerate(container):
+                if not isinstance(item, dict):
+                    continue
+                for key in price_keys:
+                    price, raw, path = parse_candidate(f"{container_key}[{idx}].{key}", item.get(key))
+                    if price is not None:
+                        return price, raw, path
+
+    return None, "", ""
+
+
 def scrape_amazon_scrapingdog(product: Product, api_key: str) -> ScrapeResult:
     if not api_key:
         return ScrapeResult(product=product, status="error", error="Missing ScrapingDog API key")
 
     try:
         response = requests.get(
-            SCRAPINGDOG_GENERIC_API,
+            AMAZON_PRODUCT_API,
             params={
                 "api_key": api_key,
                 "url": product.url,
-                "dynamic": "true",
                 "country": "us",
             },
             timeout=120,
@@ -608,28 +643,31 @@ def scrape_amazon_scrapingdog(product: Product, api_key: str) -> ScrapeResult:
         return ScrapeResult(
             product=product,
             status="error",
-            error=f"ScrapingDog generic API HTTP {response.status_code}: {body[:250]}",
-            source="scrapingdog_generic",
+            error=f"ScrapingDog Amazon Product API HTTP {response.status_code}: {body[:250]}",
+            source="scrapingdog_amazon_product",
         )
 
-    price, raw, json_title = parse_jsonld_for_price(body)
-    title = normalize_text(json_title)
-    if not title:
-        title_match = re.search(r"<title[^>]*>([\s\S]*?)</title>", body, flags=re.I)
-        title = normalize_text(title_match.group(1)) if title_match else ""
+    try:
+        data = response.json()
+    except ValueError:
+        return ScrapeResult(
+            product=product,
+            status="error",
+            error="ScrapingDog Amazon Product API returned non-JSON",
+            source="scrapingdog_amazon_product",
+        )
 
-    if price is None:
-        text = re.sub(r"<[^>]+>", " ", body)
-        price, raw = price_from_text(text)
+    title = normalize_text(data.get("title") or "")
+    price, raw, path = extract_amazon_product_api_price(data)
 
     return ScrapeResult(
         product=product,
         title=title,
         price=price,
         status="price_captured" if price is not None else "loaded_no_price",
-        error="" if price is not None else "Price not found in ScrapingDog Amazon response",
-        source="scrapingdog_generic",
-        raw_price_text=raw,
+        error="" if price is not None else "Price not found in ScrapingDog Amazon Product API response",
+        source="scrapingdog_amazon_product",
+        raw_price_text=f"{path}: {raw}" if path and raw else raw,
     )
 
 
