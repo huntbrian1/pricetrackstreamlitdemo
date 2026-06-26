@@ -46,6 +46,14 @@ def get_secret(name: str) -> str:
     return str(value or os.getenv(name, ""))
 
 
+def running_on_streamlit_cloud() -> bool:
+    return (
+        Path("/mount/src").exists()
+        or os.getenv("STREAMLIT_SHARING_MODE") == "streamlit-cloud"
+        or os.getenv("HOME") == "/home/adminuser"
+    )
+
+
 def default_seed_path() -> Path:
     return IMPORT_PATH if IMPORT_PATH.exists() else DEMO_PATH
 
@@ -288,6 +296,8 @@ if "last_save_url" not in st.session_state:
 if "last_saved_table_hash" not in st.session_state:
     st.session_state.last_saved_table_hash = table_fingerprint(st.session_state.price_table)
 
+is_streamlit_cloud = running_on_streamlit_cloud()
+
 with st.sidebar:
     if LOGO_PATH.exists():
         st.image(str(LOGO_PATH), width=150)
@@ -359,11 +369,12 @@ with st.sidebar:
         "Collection lane",
         [
             "Cloud API only (Walmart/Amazon)",
-            "Local/browser lane (uploaded or local run)",
+            "Upload local/browser results",
         ],
         index=0,
     )
     cloud_api_lane = collection_lane.startswith("Cloud API")
+    local_upload_lane = not cloud_api_lane
     if cloud_api_lane:
         retailer_choices = [
             r for r in retailer_options if canonical_retailer(r) in SCRAPINGDOG_RETAILERS
@@ -374,12 +385,21 @@ with st.sidebar:
         st.caption("Cloud-safe: Walmart and Amazon via ScrapingDog APIs. No browser settings are used.")
     else:
         retailer_choices = retailer_options
-        headless = st.checkbox("Headless browser", value=True)
-        delay_min = st.number_input("Delay min seconds", min_value=0.0, value=3.0, step=0.5)
-        delay_max = st.number_input("Delay max seconds", min_value=0.0, value=6.0, step=0.5)
-        if delay_max < delay_min:
-            st.warning("Max delay must be at least min delay.")
-        st.caption("Browser retailers should be run locally, then uploaded/saved to this master.")
+        headless = True
+        delay_min = 0.0
+        delay_max = 0.0
+        st.info(
+            "Unfortunately, Target, Dollar General, TJ Maxx, JCPenney, and other browser-rendered "
+            "retailers do not run reliably inside Streamlit Cloud. These websites are still able "
+            "to be run locally; run the local browser script, export the CSV/XLSX, upload it here, "
+            "then save to GitHub."
+        )
+        if not is_streamlit_cloud:
+            headless = st.checkbox("Headless browser", value=True)
+            delay_min = st.number_input("Delay min seconds", min_value=0.0, value=3.0, step=0.5)
+            delay_max = st.number_input("Delay max seconds", min_value=0.0, value=6.0, step=0.5)
+            if delay_max < delay_min:
+                st.warning("Max delay must be at least min delay.")
 
     selected_retailers = st.multiselect(
         "Retailers",
@@ -606,10 +626,16 @@ estimated_credits = estimate_scrapingdog_credits(products_for_run)
 limit_note = ""
 if max_rows_this_run and total_candidate_rows > len(products_for_run):
     limit_note = f" Limited to first {len(products_for_run):,} by Max rows."
-st.caption(
-    f"Ready to run {len(products_for_run):,} of {total_candidate_rows:,} matched rows. "
-    f"Estimated ScrapingDog credits: {estimated_credits:,}.{limit_note}"
-)
+if local_upload_lane and is_streamlit_cloud:
+    st.caption(
+        "Local/browser retailers should be uploaded here after a local run. "
+        "Use the upload control in the sidebar, review the table, then save to GitHub."
+    )
+else:
+    st.caption(
+        f"Ready to run {len(products_for_run):,} of {total_candidate_rows:,} matched rows. "
+        f"Estimated ScrapingDog credits: {estimated_credits:,}.{limit_note}"
+    )
 
 save_col, run_col, result_col = st.columns([0.18, 0.22, 0.60], vertical_alignment="center")
 save_clicked = save_col.button(
@@ -617,12 +643,18 @@ save_clicked = save_col.button(
     use_container_width=True,
     disabled=not can_sync_github,
 )
-run_button_label = (
-    "Run cloud API scrape"
-    if collection_lane.startswith("Cloud API")
-    else "Run selected scrape"
+if cloud_api_lane:
+    run_button_label = "Run cloud API scrape"
+elif is_streamlit_cloud:
+    run_button_label = "Upload local results instead"
+else:
+    run_button_label = "Run local/browser scrape"
+run_clicked = run_col.button(
+    run_button_label,
+    type="primary",
+    use_container_width=True,
+    disabled=local_upload_lane and is_streamlit_cloud,
 )
-run_clicked = run_col.button(run_button_label, type="primary", use_container_width=True)
 result_slot = result_col.empty()
 checkpoint_slot = st.empty()
 
