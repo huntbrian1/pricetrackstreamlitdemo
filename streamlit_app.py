@@ -276,7 +276,11 @@ st.markdown(
         border-radius: 8px;
       }
       .block-container {
-        padding-top: 1.5rem;
+        padding-top: 3.25rem;
+      }
+      .hanes-header {
+        margin-top: 0.4rem;
+        margin-bottom: 0.4rem;
       }
     </style>
     """,
@@ -469,6 +473,7 @@ with st.sidebar:
     if st.session_state.last_save_url:
         st.caption(f"[Last GitHub save]({st.session_state.last_save_url})")
 
+st.markdown('<div class="hanes-header"></div>', unsafe_allow_html=True)
 if LOGO_PATH.exists():
     logo_col, title_col = st.columns([0.12, 0.88], vertical_alignment="center")
     logo_col.image(str(LOGO_PATH), width=105)
