@@ -231,6 +231,17 @@ def table_without_row_ids(df: pd.DataFrame) -> pd.DataFrame:
     return normalize_table(df.drop(columns=[ROW_ID_COLUMN], errors="ignore"))
 
 
+def has_upload_value(value) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip() not in {"", "nan", "NaN", "None", "<NA>"}
+
+
 def coalesce_uploaded_table(master_df: pd.DataFrame, uploaded_df: pd.DataFrame) -> pd.DataFrame:
     master = normalize_table(master_df).copy().astype("object")
     uploaded = normalize_table(uploaded_df).copy().astype("object")
@@ -238,22 +249,23 @@ def coalesce_uploaded_table(master_df: pd.DataFrame, uploaded_df: pd.DataFrame) 
 
     for col in uploaded.columns:
         if col not in master.columns:
-            master[col] = ""
+            master[col] = pd.Series([""] * len(master), index=master.index, dtype="object")
     for col in master.columns:
         if col not in uploaded.columns:
-            uploaded[col] = ""
+            uploaded[col] = pd.Series([""] * len(uploaded), index=uploaded.index, dtype="object")
 
+    master = master.astype("object")
     uploaded = uploaded[master.columns].astype("object")
     exact_index = {
-        tuple(str(row.get(col, "") or "").strip() for col in key_cols): idx
+        tuple("" if not has_upload_value(row.get(col, "")) else str(row.get(col, "")).strip() for col in key_cols): idx
         for idx, row in master.iterrows()
     }
     master_link_counts = master["link"].fillna("").astype(str).str.strip().value_counts()
     upload_link_counts = uploaded["link"].fillna("").astype(str).str.strip().value_counts()
 
     for _, row in uploaded.iterrows():
-        key = tuple(str(row.get(col, "") or "").strip() for col in key_cols)
-        link = str(row.get("link", "") or "").strip()
+        key = tuple("" if not has_upload_value(row.get(col, "")) else str(row.get(col, "")).strip() for col in key_cols)
+        link = "" if not has_upload_value(row.get("link", "")) else str(row.get("link", "")).strip()
         idx = exact_index.get(key)
 
         if idx is None and link and master_link_counts.get(link, 0) == 1 and upload_link_counts.get(link, 0) == 1:
@@ -262,13 +274,14 @@ def coalesce_uploaded_table(master_df: pd.DataFrame, uploaded_df: pd.DataFrame) 
         if idx is None:
             idx = len(master)
             master.loc[idx, master.columns] = ""
+            master = master.astype("object")
 
         for col in uploaded.columns:
             value = row.get(col, "")
-            if str(value or "").strip() != "":
+            if has_upload_value(value):
                 master.at[idx, col] = value
 
-        updated_key = tuple(str(master.at[idx, col] or "").strip() for col in key_cols)
+        updated_key = tuple("" if not has_upload_value(master.at[idx, col]) else str(master.at[idx, col]).strip() for col in key_cols)
         exact_index[updated_key] = idx
 
     return normalize_table(master)
