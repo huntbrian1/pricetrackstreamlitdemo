@@ -1,0 +1,7 @@
+If Walmart/Amazon were already run in Streamlit, export the full Streamlit table and place it in this folder as one of:
+
+current_price_master.xlsx
+current_price_master.csv
+
+The runner will use that file first.
+If neither file exists, it falls back to retail_wip_links_import.csv.

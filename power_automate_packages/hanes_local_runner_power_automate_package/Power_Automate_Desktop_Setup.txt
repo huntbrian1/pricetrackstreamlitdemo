@@ -1,0 +1,100 @@
+Power Automate Desktop Setup For Hanes Local Price Runner
+=========================================================
+
+Recommended folder location:
+
+C:\Hanes\Hanes_Local_Price_Runner
+
+First-time setup:
+
+1. Copy this full folder to the stable folder location above.
+2. Make sure Python 3.10+ or Anaconda is installed on the computer.
+3. Optional: double-click Install_Local_Runner_Dependencies.bat one time.
+4. Confirm Run_Hanes_Local_Price_Tracker.bat works manually before wiring Power Automate.
+
+The Power Automate batch file also checks/install missing Python packages automatically, so the installer is optional after Python itself exists.
+
+Desktop Flow Option A: Silent Automation Run
+--------------------------------------------
+
+Use this for scheduled or simple team use.
+
+1. Open Power Automate Desktop.
+2. Create a new desktop flow named:
+   Hanes Local Price Run
+3. Add action:
+   Run DOS command
+4. DOS command:
+   cmd.exe /c ""C:\Hanes\Hanes_Local_Price_Runner\PowerAutomate_Run_Hanes_Local_Price_Tracker.bat""
+5. Working folder:
+   C:\Hanes\Hanes_Local_Price_Runner
+6. Optional: Add "Display message" after the command:
+   Local price run finished. Upload the newest *_full_master.csv or *_full_master.xlsx from local_outputs into Streamlit, then click Save to GitHub.
+7. Optional: Add "Run application" after the command:
+   explorer.exe
+   Arguments:
+   "C:\Hanes\Hanes_Local_Price_Runner\local_outputs"
+
+Desktop Flow Option B: Visible Terminal For Demo
+------------------------------------------------
+
+Use this when recording or showing the process.
+
+1. Add action:
+   Run application
+2. Application path:
+   C:\Windows\System32\cmd.exe
+3. Command line arguments:
+   /k ""C:\Hanes\Hanes_Local_Price_Runner\Run_Hanes_Local_Price_Tracker.bat""
+4. Working folder:
+   C:\Hanes\Hanes_Local_Price_Runner
+
+This keeps the terminal visible and shows live row-by-row price capture.
+
+Dependency Install Inside Power Automate
+----------------------------------------
+
+The PowerAutomate_Run_Hanes_Local_Price_Tracker.bat file checks for required Python packages every time it runs:
+
+- pandas
+- openpyxl
+- requests
+- playwright
+- Playwright Chromium browser
+
+If packages are missing, it installs them automatically before running the tracker. The only thing it still needs is Python itself. If Python is not installed, install Python 3.10+ or Anaconda one time, then rerun the flow.
+
+After The Local Run
+-------------------
+
+1. Open Streamlit.
+2. If Walmart/Amazon were already run in Streamlit before the local run, export the full table from Streamlit first and save it in this folder as:
+   input\current_price_master.xlsx
+   or
+   input\current_price_master.csv
+3. Run the Power Automate desktop flow.
+4. Upload the newest local_outputs file ending in:
+   *_full_master.csv
+   or
+   *_full_master.xlsx
+5. Confirm the preview looks right.
+6. Click Save to GitHub.
+
+Why This Local Step Exists
+--------------------------
+
+Unfortunately, Target, Dollar General, TJ Maxx, JCPenney, and other browser-rendered retailers do not run reliably inside Streamlit Cloud. These websites are still able to be run locally; run the local browser script, export the CSV/XLSX, upload it here, then save to GitHub. These retailers are run for free locally because Playwright drives the browser directly instead of using paid ScrapingDog credits.
+
+Operational Notes
+-----------------
+
+- The computer should stay awake during the local browser run.
+- The user can walk away while the local browser run is active if the computer stays awake, online, and available to automate the browser.
+- Streamlit Cloud runs should stay open and monitored, but the user can still work in other applications while the API run is active.
+- Streamlit provides the shared team view after cloud API runs and local upload results are saved.
+- Target uses slower pacing than the other local retailers: 8 to 20 seconds between rows, restart/rest every 25 Target rows, longer rest every 75 Target rows, and a 50-row Target cap per run.
+- Target soft failures trigger a 5 to 10 minute browser rest/restart first; repeated soft failures set a 60 to 90 minute Target cooldown. The runner continues other retailers, waits out any remaining soft cooldown time, then tries the missed/deferred Target rows once.
+- Target hard blocks set a 24 hour cooldown; repeated hard blocks set a 48 hour cooldown. Cooldowns are remembered in state\retailer_cooldowns.json.
+- Dollar General, TJ Maxx, and JCPenney use 5 to 9 second row pacing, restart/rest every 40 rows, longer rest every 100 rows, and a 150-row per-retailer cap.
+- If a browser retailer starts returning block pages, the runner saves a checkpoint and skips the rest of that retailer for the current run instead of retrying.
+- If the user closes the browser, the runner saves a checkpoint and stops cleanly so the untouched rows can be run later.

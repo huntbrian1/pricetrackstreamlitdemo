@@ -1,0 +1,11 @@
+The all-retailer runner will create and keep updating:
+
+hanes_all_retailers_price_master.xlsx
+hanes_all_retailers_price_master.csv
+
+This is the living master file.
+Each run adds the new daily price/discount columns into this file.
+
+Timestamped daily run files are still saved separately in:
+
+all_retailer_outputs

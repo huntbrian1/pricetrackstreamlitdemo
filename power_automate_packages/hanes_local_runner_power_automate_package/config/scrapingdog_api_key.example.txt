@@ -1,0 +1,7 @@
+Paste the ScrapingDog API key into a new file named:
+
+scrapingdog_api_key.txt
+
+Keep that file in this same config folder.
+
+Do not rename this example file; create the real scrapingdog_api_key.txt file next to it.

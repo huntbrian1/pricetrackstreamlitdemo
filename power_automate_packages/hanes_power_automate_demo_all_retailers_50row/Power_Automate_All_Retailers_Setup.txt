@@ -1,0 +1,110 @@
+Power Automate Desktop Setup: All-Retailer Version
+==================================================
+
+Use this version only if Hanes wants one local computer to run everything:
+
+- Target, Dollar General, JCPenney through local Playwright
+- Walmart and Amazon through paid ScrapingDog API calls
+
+The existing local-only Power Automate file still exists and is unchanged:
+
+PowerAutomate_Run_Hanes_Local_Price_Tracker.bat
+
+The new all-retailer Power Automate file is:
+
+PowerAutomate_Run_Hanes_All_Retailers.bat
+
+API Key Setup
+-------------
+
+This all-retailer version needs a ScrapingDog API key.
+
+Option A: environment variable
+
+Set a Windows environment variable named:
+
+SCRAPINGDOG_API_KEY
+
+Option B: config file
+
+Create this file:
+
+config\scrapingdog_api_key.txt
+
+Paste the real API key on the first line.
+
+Do not put the key into the example file. The example file is only an instruction note.
+
+Power Automate Desktop Steps
+----------------------------
+
+1. Open Power Automate Desktop.
+2. Create or open a desktop flow.
+3. Add action:
+   Run DOS command
+4. DOS command:
+   cmd.exe /c ""C:\Hanes\Hanes_All_Retailers_Price_Runner\PowerAutomate_Run_Hanes_All_Retailers.bat""
+5. Working folder:
+   C:\Hanes\Hanes_All_Retailers_Price_Runner
+6. Save.
+7. Click play.
+
+For Brian's current local test folder, replace C:\Hanes\Hanes_All_Retailers_Price_Runner with the actual package path.
+
+Visible Demo Version
+--------------------
+
+If you want to show the terminal and row-by-row progress, use Run application instead:
+
+Application path:
+
+C:\Windows\System32\cmd.exe
+
+Arguments:
+
+/k ""C:\Hanes\Hanes_All_Retailers_Price_Runner\Run_Hanes_All_Retailers_Visible.bat""
+
+Working folder:
+
+C:\Hanes\Hanes_All_Retailers_Price_Runner
+
+Outputs
+-------
+
+The all-retailer version writes two output types.
+
+1. Living master file:
+
+master\hanes_all_retailers_price_master.xlsx
+master\hanes_all_retailers_price_master.csv
+
+This file is updated each run and gains the new daily price/discount columns.
+
+2. Timestamped daily run files:
+
+all_retailer_outputs
+
+Use the newest file ending in:
+
+_full_master.csv
+or
+_full_master.xlsx
+
+The daily run folder also includes a *_run_results.csv audit/status file.
+
+Costs And Caveats
+-----------------
+
+- Walmart uses ScrapingDog credits.
+- Amazon uses ScrapingDog credits.
+- Target, Dollar General, and JCPenney use local Playwright and do not use ScrapingDog credits.
+- The runner saves checkpoints every 25 completed rows.
+- If interrupted, use the newest checkpoint full-master file.
+- The fixed master file in master is also refreshed at each checkpoint.
+- The computer should stay awake while the all-retailer run is active.
+- Target uses slower pacing than the other local retailers: 8 to 20 seconds between rows, restart/rest every 25 Target rows, longer rest every 75 Target rows, and a 50-row Target cap per run.
+- Target soft failures trigger a 5 to 10 minute browser rest/restart first; repeated soft failures set a 60 to 90 minute Target cooldown. The runner continues other retailers, waits out any remaining soft cooldown time, then tries the missed/deferred Target rows once.
+- Target hard blocks set a 24 hour cooldown; repeated hard blocks set a 48 hour cooldown. Cooldowns are remembered in state\retailer_cooldowns.json.
+- Dollar General and JCPenney use 5 to 9 second row pacing, restart/rest every 40 rows, longer rest every 100 rows, and a 150-row per-retailer cap.
+- If a browser retailer returns a block page, the runner saves immediately and skips the rest of that retailer for the current run instead of retrying.
+- If the user closes the browser, the runner saves immediately and stops cleanly so remaining rows are not marked failed.

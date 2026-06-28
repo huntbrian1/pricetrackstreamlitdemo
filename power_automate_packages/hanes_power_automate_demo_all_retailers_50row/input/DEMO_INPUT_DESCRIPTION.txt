@@ -1,0 +1,10 @@
+This demo input contains exactly 50 rows:
+
+- 10 Target
+- 10 Walmart
+- 10 Amazon
+- 10 Dollar General
+- 10 JCPenney
+- 0 TJ Maxx
+
+Rows are ordered in retailer blocks so the Power Automate video can show one retailer section at a time.
