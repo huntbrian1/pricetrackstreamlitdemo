@@ -336,31 +336,39 @@ def save_table_to_github(
     url = github_contents_url(repo, path)
     headers = github_headers(token)
     params = {"ref": branch}
+    content = base64.b64encode(df_to_csv_bytes(df)).decode("ascii")
 
-    sha = ""
-    get_response = requests.get(url, headers=headers, params=params, timeout=30)
-    if get_response.status_code == 200:
-        sha = str(get_response.json().get("sha") or "")
-    elif get_response.status_code != 404:
-        raise GitHubStorageError(
-            f"GitHub pre-save check failed HTTP {get_response.status_code}: {get_response.text[:300]}"
-        )
+    for attempt in range(3):
+        sha = ""
+        get_response = requests.get(url, headers=headers, params=params, timeout=30)
+        if get_response.status_code == 200:
+            sha = str(get_response.json().get("sha") or "")
+        elif get_response.status_code != 404:
+            raise GitHubStorageError(
+                f"GitHub pre-save check failed HTTP {get_response.status_code}: {get_response.text[:300]}"
+            )
 
-    body: dict[str, Any] = {
-        "message": message,
-        "content": base64.b64encode(df_to_csv_bytes(df)).decode("ascii"),
-        "branch": branch,
-    }
-    if sha:
-        body["sha"] = sha
+        body: dict[str, Any] = {
+            "message": message,
+            "content": content,
+            "branch": branch,
+        }
+        if sha:
+            body["sha"] = sha
 
-    put_response = requests.put(url, headers=headers, json=body, timeout=45)
-    if put_response.status_code not in {200, 201}:
+        put_response = requests.put(url, headers=headers, json=body, timeout=45)
+        if put_response.status_code in {200, 201}:
+            return put_response.json()
+
+        if put_response.status_code == 409 and attempt < 2:
+            time.sleep(0.75 * (attempt + 1))
+            continue
+
         raise GitHubStorageError(
             f"GitHub save failed HTTP {put_response.status_code}: {put_response.text[:300]}"
         )
 
-    return put_response.json()
+    raise GitHubStorageError("GitHub save failed after retrying content SHA refresh.")
 
 
 def products_from_df(df: pd.DataFrame) -> list[Product]:
