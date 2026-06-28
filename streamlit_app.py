@@ -481,9 +481,21 @@ with st.sidebar:
             r for r in retailer_options if canonical_retailer(r) in SCRAPINGDOG_RETAILERS
         ]
         headless = True
-        delay_min = 0.0
-        delay_max = 0.0
         st.caption("Cloud-safe: Walmart and Amazon via ScrapingDog APIs. No browser settings are used.")
+        delay_min = st.number_input(
+            "Delay min seconds",
+            min_value=0.0,
+            value=1.0,
+            step=0.5,
+            help="Random wait before each cloud API row. This slows the run slightly but keeps progress/checkpointing easier to follow.",
+        )
+        delay_max = st.number_input(
+            "Delay max seconds",
+            min_value=0.0,
+            value=2.0,
+            step=0.5,
+            help="Upper end of the random wait before each cloud API row.",
+        )
     else:
         retailer_choices = retailer_options
         headless = True
@@ -499,8 +511,9 @@ with st.sidebar:
             headless = st.checkbox("Headless browser", value=True)
             delay_min = st.number_input("Delay min seconds", min_value=0.0, value=3.0, step=0.5)
             delay_max = st.number_input("Delay max seconds", min_value=0.0, value=6.0, step=0.5)
-            if delay_max < delay_min:
-                st.warning("Max delay must be at least min delay.")
+
+    if delay_max < delay_min:
+        st.warning("Max delay must be at least min delay.")
 
     selected_retailers = st.multiselect(
         "Retailers",
@@ -569,6 +582,30 @@ with st.sidebar:
         st.caption(st.session_state.github_status)
     if st.session_state.last_save_url:
         st.caption(f"[Last GitHub save]({st.session_state.last_save_url})")
+
+    with st.expander("Control guide", expanded=False):
+        st.markdown(
+            """
+- **Upload / merge local results**: add a local Power Automate CSV/XLSX into the master table. Uploads are merged by link and row identity; missing Walmart/Amazon rows in the upload do not delete existing rows.
+- **Auto-save uploads to GitHub**: saves uploaded local results immediately so they stay after refresh.
+- **Load workbook import**: reloads the bundled starter workbook table.
+- **Load saved GitHub master**: reloads the current shared GitHub table.
+- **Price column date**: chooses the dated price/discount columns the next run writes into.
+- **ScrapingDog API key**: required for Walmart and Amazon cloud API runs.
+- **Collection lane**: Cloud API runs Walmart/Amazon in Streamlit; Upload local/browser results is for Target, Dollar General, TJ Maxx, JCPenney, and similar local browser runs.
+- **Delay min/max seconds**: random wait between checked rows. Higher values are slower but easier to monitor.
+- **Retailers**: limits the run to selected retailers.
+- **Run visible filtered rows only**: runs only rows currently visible after the table filters.
+- **Only rows missing this price column**: skips rows that already have a price for the selected date.
+- **Checkpoint save every rows**: saves results during the run after each batch.
+- **Max rows this run**: caps the run size; use `0` for all matched rows.
+- **Confirm paid ScrapingDog run**: required because Walmart/Amazon calls spend ScrapingDog credits.
+- **Auto-save GitHub master after scrape**: writes scrape checkpoints/results to the shared GitHub table.
+- **Auto-save table edits to GitHub**: saves manual cell edits after the table changes.
+- **Allow run without GitHub auto-save**: temporary session-only run; export the full table before closing or refreshing.
+- **Save to GitHub**: manually saves the table exactly as shown in the app.
+            """
+        )
 
 st.markdown('<div class="hanes-header"></div>', unsafe_allow_html=True)
 if LOGO_PATH.exists():
