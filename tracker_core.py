@@ -106,6 +106,32 @@ def today_price_col(now: datetime | None = None) -> str:
 def price_columns(df: pd.DataFrame) -> list[str]:
     return [col for col in df.columns if str(col).endswith(PRICE_COL_SUFFIX)]
 
+def is_missing_cell(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip() in {"", "nan", "NaN", "None", "<NA>"}
+
+
+def normalize_text_cell(value: Any) -> str:
+    return "" if is_missing_cell(value) else str(value).strip()
+
+
+def normalize_price_cell(value: Any) -> Any:
+    if is_missing_cell(value):
+        return ""
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    numeric = pd.to_numeric(text.replace("$", "").replace(",", ""), errors="coerce")
+    if not pd.isna(numeric):
+        return float(numeric)
+    return text
+
 
 def discount_columns(df: pd.DataFrame) -> list[str]:
     return [col for col in df.columns if str(col).endswith(DISCOUNT_COL_SUFFIX)]
@@ -162,6 +188,8 @@ def canonical_retailer(value: Any) -> str:
 
 def normalize_table(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    df.columns = [str(col).strip() for col in df.columns]
+    df = df.astype("object")
     if "last_seen" in df.columns and LAST_RUN_COLUMN not in df.columns:
         df = df.rename(columns={"last_seen": LAST_RUN_COLUMN})
 
@@ -194,8 +222,10 @@ def normalize_table(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = ""
 
     for col in BASE_COLUMNS + [LAST_RUN_COLUMN]:
-        df[col] = df[col].fillna("").astype(str)
-        df[col] = df[col].replace({"nan": "", "NaN": "", "None": ""})
+        df[col] = df[col].map(normalize_text_cell).astype("object")
+
+    for col in price_columns(df):
+        df[col] = df[col].map(normalize_price_cell).astype("object")
 
     df["link"] = df["link"].fillna("").astype(str).str.strip()
     df["retailer"] = [

@@ -21,7 +21,7 @@ Old tracker files that use `url` instead of `link` still upload cleanly. The app
 
 ## Retailer Routing
 
-- Target: Playwright, randomized delay.
+- Target: Target Redsky API with randomized delay, with no ScrapingDog credits.
 - Dollar General: Playwright, randomized delay.
 - TJ Maxx: Playwright, randomized delay.
 - JCPenney: Playwright, randomized delay.
@@ -92,7 +92,7 @@ The GitHub token needs permission to read and write repository contents. For a f
 1. Open the Streamlit app.
 2. Edit rows directly in the table, or reupload the latest CSV/XLSX.
 3. Leave `Only rows missing this price column` checked for normal daily runs.
-4. Leave `Auto-save GitHub master after scrape` checked.
+4. Make sure the sidebar says `GitHub checkpoint save: on`.
 5. Keep `Checkpoint save every rows` at `75` unless there is a reason to change it.
 6. Use `Max rows this run` for test runs; set it to `0` only when intentionally running all matched rows.
 7. Check `Confirm paid ScrapingDog run` before running Walmart or Amazon rows.

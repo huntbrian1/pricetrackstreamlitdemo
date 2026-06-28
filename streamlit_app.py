@@ -11,10 +11,12 @@ import streamlit as st
 from tracker_core import (
     CATEGORY_COLUMN,
     PDP_TITLE_COLUMN,
+    LAST_RUN_COLUMN,
     ROW_ID_COLUMN,
     SCRAPINGDOG_RETAILERS,
     ScrapeResult,
     canonical_retailer,
+    dataframe_from_upload,
     df_to_csv_bytes,
     df_to_xlsx_bytes,
     discount_columns,
@@ -187,6 +189,38 @@ def contains_filter(df: pd.DataFrame, column: str, needle: str) -> pd.Series:
     return df[column].fillna("").astype(str).str.contains(needle.strip(), case=False, na=False)
 
 
+def display_key(row: pd.Series) -> tuple[str, str | tuple[str, ...]]:
+    link = str(row.get("link", "") or "").strip().casefold()
+    if link:
+        return ("link", link)
+    return (
+        "row",
+        tuple(str(row.get(col, "") or "").strip().casefold() for col in ["retailer", "brand", CATEGORY_COLUMN, "color", "size", "title"]),
+    )
+
+
+def most_recent_upload_keys(uploaded_df: pd.DataFrame) -> set[tuple[str, str | tuple[str, ...]]]:
+    uploaded = normalize_table(uploaded_df)
+    return {display_key(row) for _, row in uploaded.iterrows()}
+
+
+def sort_recent_rows_first(df: pd.DataFrame) -> pd.DataFrame:
+    table = normalize_table(df).reset_index(drop=True)
+    recent_keys = st.session_state.get("recent_upload_keys", set())
+    if not recent_keys:
+        return table
+
+    table["_recent_upload_order"] = [0 if display_key(row) in recent_keys else 1 for _, row in table.iterrows()]
+    table["_original_order"] = range(len(table))
+    table["_last_run_sort"] = pd.to_datetime(table[LAST_RUN_COLUMN], errors="coerce", utc=True)
+    table = table.sort_values(
+        ["_recent_upload_order", "_last_run_sort", "_original_order"],
+        ascending=[True, False, True],
+        na_position="last",
+    )
+    return table.drop(columns=["_recent_upload_order", "_last_run_sort", "_original_order"])
+
+
 def add_row_ids(df: pd.DataFrame) -> pd.DataFrame:
     table = normalize_table(df).reset_index(drop=True)
     table.insert(0, ROW_ID_COLUMN, range(1, len(table) + 1))
@@ -198,8 +232,8 @@ def table_without_row_ids(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def coalesce_uploaded_table(master_df: pd.DataFrame, uploaded_df: pd.DataFrame) -> pd.DataFrame:
-    master = normalize_table(master_df).copy()
-    uploaded = normalize_table(uploaded_df).copy()
+    master = normalize_table(master_df).copy().astype("object")
+    uploaded = normalize_table(uploaded_df).copy().astype("object")
     key_cols = ["retailer", "brand", CATEGORY_COLUMN, "color", "size", "link"]
 
     for col in uploaded.columns:
@@ -209,7 +243,7 @@ def coalesce_uploaded_table(master_df: pd.DataFrame, uploaded_df: pd.DataFrame) 
         if col not in uploaded.columns:
             uploaded[col] = ""
 
-    uploaded = uploaded[master.columns]
+    uploaded = uploaded[master.columns].astype("object")
     exact_index = {
         tuple(str(row.get(col, "") or "").strip() for col in key_cols): idx
         for idx, row in master.iterrows()
@@ -364,10 +398,8 @@ with st.sidebar:
         upload_id = (uploaded.name, uploaded.size)
         if st.session_state.upload_id != upload_id:
             try:
-                if uploaded.name.lower().endswith((".xlsx", ".xls")):
-                    uploaded_table = pd.read_excel(uploaded)
-                else:
-                    uploaded_table = pd.read_csv(uploaded)
+                uploaded_table = dataframe_from_upload(uploaded)
+                st.session_state.recent_upload_keys = most_recent_upload_keys(uploaded_table)
                 before_rows = len(normalize_table(st.session_state.price_table))
                 st.session_state.price_table = coalesce_uploaded_table(
                     st.session_state.price_table,
@@ -533,7 +565,7 @@ if LOGO_PATH.exists():
 else:
     st.title("Hanes Price Tracker")
 
-table = normalize_table(st.session_state.price_table)
+table = sort_recent_rows_first(st.session_state.price_table)
 latest_price = price_columns(table)[-1] if price_columns(table) else "none"
 
 m1, m2, m3, m4 = st.columns(4)
@@ -618,7 +650,7 @@ edited = st.data_editor(
 )
 st.session_state.price_table = merge_editor_view_into_master(table, edited)
 
-current_table = normalize_table(st.session_state.price_table)
+current_table = sort_recent_rows_first(st.session_state.price_table)
 current_table_hash = table_fingerprint(current_table)
 if (
     auto_save_edits_github
@@ -853,7 +885,7 @@ if not st.session_state.last_results.empty:
         use_container_width=True,
         height=260,
     )
-    latest_table = normalize_table(st.session_state.price_table)
+    latest_table = sort_recent_rows_first(st.session_state.price_table)
     dl1, dl2, dl3 = st.columns(3)
     dl1.download_button(
         "Download Updated Full CSV",
